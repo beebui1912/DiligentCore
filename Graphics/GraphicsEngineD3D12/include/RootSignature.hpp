@@ -143,7 +143,7 @@ public:
 
     bool IsShaderRecord(const D3DShaderResourceAttribs& CB) const;
 
-    bool Create(ID3D12Device* pDevice, Uint32 RegisterSpace);
+    bool Create(ID3D12Device* pDevice, Uint32 RegisterSpace, UINT NodeMask);
 
     ID3D12RootSignature* GetD3D12RootSignature() const { return m_pd3d12RootSignature; }
     bool                 IsDefined() const { return m_ShaderRecordSize > 0 && !m_Name.empty(); }

@@ -51,6 +51,13 @@ SwapChainVkImpl::SwapChainVkImpl(IReferenceCounters*  pRefCounters,
     m_SwapChainImagesInitialized (STD_ALLOCATOR_RAW_MEM(bool, GetRawAllocator(), "Allocator for vector<bool>"))
 // clang-format on
 {
+    if (m_SwapChainDesc.AlternateFrameContextMask != 0)
+    {
+        LOG_WARNING_MESSAGE("SwapChainDesc.AlternateFrameContextMask is ignored: it is only supported in Direct3D12. "
+                            "In Vulkan, render on any node and copy the frame to the node of the swap chain's context.");
+        m_SwapChainDesc.AlternateFrameContextMask = 0;
+    }
+
     CreateSurface();
     CreateVulkanSwapChain();
     InitBuffersAndViews();
@@ -178,6 +185,66 @@ void SwapChainVkImpl::CreateSurface()
     {
         DEV_ERROR("Immediate context has been released");
     }
+}
+
+VkDeviceGroupPresentModeFlagsKHR SwapChainVkImpl::SelectDeviceGroupPresentMode()
+{
+    // Default: device 0 presents its own instance (LOCAL mode is always supported)
+    m_PresentDeviceMask      = 1;
+    m_DeviceGroupPresentMode = VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR;
+
+    Uint32 NodeIndex = 0;
+    if (RefCntAutoPtr<IDeviceContext> pContext = m_wpDeviceContext.Lock())
+        NodeIndex = pContext->GetDesc().NodeIndex;
+    if (NodeIndex == 0)
+        return VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR;
+
+    // The swap chain context is on another node, which renders into its own instance of the back buffer.
+    // Present that instance: from that node if it has a presentation engine (LOCAL), otherwise from a node
+    // that can present it (REMOTE).
+#if DILIGENT_USE_VOLK
+    RenderDeviceVkImpl* pRenderDeviceVk = m_pRenderDevice.RawPtr<RenderDeviceVkImpl>();
+    const VkDevice      vkDevice        = pRenderDeviceVk->GetVkDevice();
+
+    VkDeviceGroupPresentCapabilitiesKHR Caps{};
+    Caps.sType = VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_CAPABILITIES_KHR;
+    if (vkGetDeviceGroupPresentCapabilitiesKHR != nullptr && vkGetDeviceGroupPresentCapabilitiesKHR(vkDevice, &Caps) == VK_SUCCESS)
+    {
+        VkDeviceGroupPresentModeFlagsKHR Modes = Caps.modes;
+        if (vkGetDeviceGroupSurfacePresentModesKHR != nullptr)
+        {
+            VkDeviceGroupPresentModeFlagsKHR SurfaceModes = 0;
+            if (vkGetDeviceGroupSurfacePresentModesKHR(vkDevice, m_VkSurface, &SurfaceModes) == VK_SUCCESS)
+                Modes &= SurfaceModes;
+        }
+
+        const uint32_t NodeBit = 1u << NodeIndex;
+        if ((Modes & VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR) != 0 && (Caps.presentMask[NodeIndex] & NodeBit) != 0)
+        {
+            m_PresentDeviceMask = NodeBit;
+            LOG_INFO_MESSAGE("Vulkan linked multi-GPU: node ", NodeIndex, " presents its swap chain images (local present mode)");
+            return VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR;
+        }
+        if ((Modes & VK_DEVICE_GROUP_PRESENT_MODE_REMOTE_BIT_KHR) != 0)
+        {
+            for (uint32_t Presenter = 0; Presenter < VK_MAX_DEVICE_GROUP_SIZE; ++Presenter)
+            {
+                if ((Caps.presentMask[Presenter] & NodeBit) != 0)
+                {
+                    m_PresentDeviceMask      = NodeBit;
+                    m_DeviceGroupPresentMode = VK_DEVICE_GROUP_PRESENT_MODE_REMOTE_BIT_KHR;
+                    LOG_INFO_MESSAGE("Vulkan linked multi-GPU: node ", Presenter, " presents the swap chain images of node ", NodeIndex, " (remote present mode)");
+                    return VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR | VK_DEVICE_GROUP_PRESENT_MODE_REMOTE_BIT_KHR;
+                }
+            }
+        }
+    }
+#endif
+
+    LOG_WARNING_MESSAGE("The immediate context of the swap chain is on node ", NodeIndex,
+                        ", whose swap chain images no device of the group can present. Node 0's instance of the back buffer is presented: "
+                        "render the frame on node 0, or copy it to node 0 before presenting.");
+    return VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR;
 }
 
 void SwapChainVkImpl::CreateVulkanSwapChain()
@@ -483,6 +550,16 @@ void SwapChainVkImpl::CreateVulkanSwapChain()
     const VulkanUtilities::LogicalDevice& LogicalDevice = pRenderDeviceVk->GetLogicalDevice();
     VkDevice                              vkDevice      = pRenderDeviceVk->GetVkDevice();
 
+    // Linked multi-GPU: device group swap chain, only if the logical device is a device group
+    VkDeviceGroupSwapchainCreateInfoKHR DeviceGroupSwapchainCI{};
+    if (LogicalDevice.IsDeviceGroup())
+    {
+        DeviceGroupSwapchainCI.sType = VK_STRUCTURE_TYPE_DEVICE_GROUP_SWAPCHAIN_CREATE_INFO_KHR;
+        DeviceGroupSwapchainCI.modes = SelectDeviceGroupPresentMode();
+        DeviceGroupSwapchainCI.pNext = swapchain_ci.pNext;
+        swapchain_ci.pNext           = &DeviceGroupSwapchainCI;
+    }
+
     err = vkCreateSwapchainKHR(vkDevice, &swapchain_ci, NULL, &m_VkSwapChain);
     CHECK_VK_ERROR_AND_THROW(err, "Failed to create Vulkan swapchain");
 
@@ -727,6 +804,20 @@ void SwapChainVkImpl::Present(Uint32 SyncInterval)
             PresentInfo.pSwapchains     = &m_VkSwapChain;
             PresentInfo.pImageIndices   = &m_BackBufferIndex;
             PresentInfo.pResults        = &Result;
+
+            // Linked multi-GPU: present the instance of the image that the swap chain context's node rendered
+            // (see SelectDeviceGroupPresentMode()). Node 0 and LOCAL mode unless that context is on another node.
+            VkDeviceGroupPresentInfoKHR DeviceGroupPresentInfo{};
+            if (pDeviceVk->GetLogicalDevice().IsDeviceGroup())
+            {
+                DeviceGroupPresentInfo.sType          = VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR;
+                DeviceGroupPresentInfo.swapchainCount = 1;
+                DeviceGroupPresentInfo.pDeviceMasks   = &m_PresentDeviceMask;
+                DeviceGroupPresentInfo.mode           = m_DeviceGroupPresentMode;
+                DeviceGroupPresentInfo.pNext          = PresentInfo.pNext;
+                PresentInfo.pNext                     = &DeviceGroupPresentInfo;
+            }
+
             pDeviceVk->LockCmdQueueAndRun(
                 pImmediateCtxVk->GetCommandQueueId(),
                 [&PresentInfo](ICommandQueueVk* pCmdQueueVk) //

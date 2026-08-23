@@ -79,6 +79,16 @@ DILIGENT_TYPED_ENUM(MISC_BUFFER_FLAGS, Uint8)
     /// For a sparse buffer, allow binding the same memory region in different buffer ranges
     /// or in different sparse buffers.
     MISC_BUFFER_FLAG_SPARSE_ALIASING = 1u << 0,
+
+    /// Direct3D12 only: the buffer can be shared with a device on another adapter (unlinked multi-GPU).
+    /// It is placed at the start of its own shared cross-adapter heap. It must be a USAGE_DEFAULT buffer.
+    ///
+    /// \note  Direct3D12 shares the heap, not the buffer. Call ID3D12Device::CreateSharedHandle() for the
+    ///        heap returned by IBufferD3D12::GetD3D12SharedHeap(). On the other device, call
+    ///        ID3D12Device::OpenSharedHandle(), ID3D12Device::CreatePlacedResource() with the same
+    ///        resource description at offset 0, and IRenderDeviceD3D12::CreateBufferFromD3DResource().
+    ///        The application must synchronize the devices.
+    MISC_BUFFER_FLAG_SHARED_CROSS_ADAPTER = 1u << 1,
 };
 DEFINE_FLAG_ENUM_OPERATORS(MISC_BUFFER_FLAGS)
 
@@ -129,6 +139,25 @@ struct BufferDesc DILIGENT_DERIVE(DeviceObjectAttribs)
     ///             will actually be used. Do not set unnecessary bits as this will result in extra overhead.
     Uint64 ImmediateContextMask     DEFAULT_INITIALIZER(1);
 
+    /// Bitmask identifying the GPU node where physical memory will be allocated (0 = default node 0).
+
+    /// Linked multi-GPU only (ignored otherwise); exactly one bit.
+    /// * Direct3D12: the heap's creation node.
+    /// * Vulkan (device group): if this mask or VisibleNodeMask is set, the buffer lives in this node's
+    ///   instance of the memory. If both are 0, every node keeps its own copy of the buffer, and the
+    ///   initial data is written to every copy. The resource state is tracked once per buffer, not per
+    ///   copy, so such a buffer must be used on one node, or with explicit transitions: to use a buffer
+    ///   on several nodes, set these masks or create a buffer per node.
+    Uint32 CreationNodeMask         DEFAULT_INITIALIZER(0);
+
+    /// Bitmask identifying GPU nodes that can access this resource (0 = the creation node only).
+
+    /// Linked multi-GPU only (ignored otherwise).
+    /// * Direct3D12: the heap's visible nodes. Nodes other than the creation node require cross-node sharing.
+    /// * Vulkan (device group): the other nodes in the mask use the creation node's memory (peer memory).
+    ///   Which accesses they can make depends on the peer memory features the device reports.
+    Uint32 VisibleNodeMask          DEFAULT_INITIALIZER(0);
+
 
 #if DILIGENT_CPP_INTERFACE
     // We have to explicitly define constructors because otherwise the following initialization fails on Apple's clang:
@@ -143,7 +172,9 @@ struct BufferDesc DILIGENT_DERIVE(DeviceObjectAttribs)
                          CPU_ACCESS_FLAGS _CPUAccessFlags       = BufferDesc{}.CPUAccessFlags,
                          BUFFER_MODE      _Mode                 = BufferDesc{}.Mode,
                          Uint32           _ElementByteStride    = BufferDesc{}.ElementByteStride,
-                         Uint64           _ImmediateContextMask = BufferDesc{}.ImmediateContextMask) noexcept :
+                         Uint64           _ImmediateContextMask = BufferDesc{}.ImmediateContextMask,
+                         Uint32           _CreationNodeMask     = BufferDesc{}.CreationNodeMask,
+                         Uint32           _VisibleNodeMask      = BufferDesc{}.VisibleNodeMask) noexcept :
         DeviceObjectAttribs  {_Name             },
         Size                 {_Size             },
         BindFlags            {_BindFlags        },
@@ -151,7 +182,9 @@ struct BufferDesc DILIGENT_DERIVE(DeviceObjectAttribs)
         CPUAccessFlags       {_CPUAccessFlags   },
         Mode                 {_Mode             },
         ElementByteStride    {_ElementByteStride},
-        ImmediateContextMask {_ImmediateContextMask}
+        ImmediateContextMask {_ImmediateContextMask},
+        CreationNodeMask     {_CreationNodeMask },
+        VisibleNodeMask      {_VisibleNodeMask  }
     {
     }
 
@@ -175,7 +208,9 @@ struct BufferDesc DILIGENT_DERIVE(DeviceObjectAttribs)
                 CPUAccessFlags       == RHS.CPUAccessFlags    &&
                 Mode                 == RHS.Mode              &&
                 ElementByteStride    == RHS.ElementByteStride &&
-                ImmediateContextMask == RHS.ImmediateContextMask;
+                ImmediateContextMask == RHS.ImmediateContextMask &&
+                CreationNodeMask     == RHS.CreationNodeMask     &&
+                VisibleNodeMask      == RHS.VisibleNodeMask;
     }
 #endif
 };

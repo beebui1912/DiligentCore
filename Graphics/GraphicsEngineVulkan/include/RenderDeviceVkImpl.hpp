@@ -29,6 +29,7 @@
 
 /// \file
 /// Declaration of Diligent::RenderDeviceVkImpl class
+#include <array>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -215,7 +216,29 @@ public:
                                   VulkanUtilities::CommandPoolWrapper& CmdPool,
                                   VulkanUtilities::CommandBuffer&      CmdBuffer,
                                   const Char*                          DebugPoolName = nullptr);
-    void ExecuteAndDisposeTransientCmdBuff(SoftwareQueueIndex CommandQueueId, VkCommandBuffer vkCmdBuff, VulkanUtilities::CommandPoolWrapper&& CmdPool);
+    // DeviceMask: linked multi-GPU devices the command buffer runs on (0 = the node of the queue)
+    void ExecuteAndDisposeTransientCmdBuff(SoftwareQueueIndex CommandQueueId, VkCommandBuffer vkCmdBuff, VulkanUtilities::CommandPoolWrapper&& CmdPool, uint32_t DeviceMask = 0);
+
+    // Linked multi-GPU (Vulkan device group) resource placement, following the resource's CreationNodeMask
+    // and VisibleNodeMask. In a device group every allocation of device-local memory has one instance on
+    // each device:
+    //  * Default masks (both 0): every device uses its own instance (the resource is replicated), so the
+    //    initial data is written to every instance.
+    //  * Explicit masks: the resource lives in the instance of its creation node; the other visible nodes
+    //    are bound to that instance (peer memory, as The Forge's pSharedNodeIndices), so the initial data
+    //    is only written there.
+    // On an ordinary device, and for memory with a single instance, nothing changes.
+
+    // Fills DeviceIndices (VkBind*MemoryDeviceGroupInfo::pDeviceIndices, GetDeviceGroupSize() elements) and
+    // returns true if the resource needs peer binding; returns false otherwise.
+    bool GetPeerBindingDeviceIndices(Uint32                                         CreationNodeMask,
+                                     Uint32                                         VisibleNodeMask,
+                                     uint32_t                                       MemoryTypeIndex,
+                                     const char*                                    ResourceName,
+                                     std::array<uint32_t, VK_MAX_DEVICE_GROUP_SIZE>& DeviceIndices) const;
+
+    // Device mask of the one-time command buffer that writes a resource's initial data (0 = the node of the queue)
+    uint32_t GetInitialDataDeviceMask(Uint32 CreationNodeMask, Uint32 VisibleNodeMask, uint32_t MemoryTypeIndex) const;
 
     /// Implementation of IRenderDevice::ReleaseStaleResources() in Vulkan backend.
     virtual void DILIGENT_CALL_TYPE ReleaseStaleResources(bool ForceRelease = false) override final;
@@ -234,6 +257,26 @@ public:
     {
         return m_pDxCompiler.get();
     }
+
+    /// Implementation of IRenderDeviceVk::GetHostMemoryTextureRequirements().
+    virtual Bool DILIGENT_CALL_TYPE GetHostMemoryTextureRequirements(const TextureDesc& TexDesc,
+                                                                     Uint64&            Size,
+                                                                     Uint64&            Alignment) const override final;
+
+    /// Implementation of IRenderDeviceVk::CreateTextureFromHostMemory().
+    virtual void DILIGENT_CALL_TYPE CreateTextureFromHostMemory(const TextureDesc& TexDesc,
+                                                                void*              pHostMemory,
+                                                                IObject*           pHostMemoryOwner,
+                                                                ITexture**         ppTexture) override final;
+
+    /// Implementation of IRenderDeviceVk::CreateSharedFence().
+    virtual Bool DILIGENT_CALL_TYPE CreateSharedFence(IRenderDevice*   pOtherDevice,
+                                                      const FenceDesc& Desc,
+                                                      IFence**         ppFence,
+                                                      IFence**         ppOtherFence) override final;
+
+    // Creates a fence that owns the timeline semaphore
+    void CreateFenceFromTimelineSemaphore(VulkanUtilities::SemaphoreWrapper&& TimelineSemaphore, const FenceDesc& Desc, IFence** ppFence);
 
     DescriptorSetAllocation AllocateDescriptorSet(Uint64 CommandQueueMask, VkDescriptorSetLayout SetLayout, const char* DebugName = "")
     {

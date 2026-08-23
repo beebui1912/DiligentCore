@@ -29,6 +29,8 @@
 
 #include "RenderDeviceVkImpl.hpp"
 
+#include <cstring>
+
 #include "PipelineStateVkImpl.hpp"
 #include "ShaderVkImpl.hpp"
 #include "TextureVkImpl.hpp"
@@ -247,6 +249,77 @@ RenderDeviceVkImpl::~RenderDeviceVkImpl()
 }
 
 
+namespace
+{
+
+// Creation node of a resource in a device group: the lowest node of CreationNodeMask (0 when it is not set)
+uint32_t GetCreationNodeIndex(Uint32 CreationNodeMask, uint32_t DeviceGroupMask, const char* ResourceName)
+{
+    const Uint32 ValidMask = CreationNodeMask & DeviceGroupMask;
+    if (ValidMask != CreationNodeMask || PlatformMisc::CountOneBits(ValidMask) > 1)
+    {
+        LOG_WARNING_MESSAGE("CreationNodeMask (0x", std::hex, CreationNodeMask, ") of resource '", (ResourceName != nullptr ? ResourceName : ""),
+                            "' must name exactly one node of the device group (mask 0x", DeviceGroupMask, std::dec, "). Using node ",
+                            (ValidMask != 0 ? PlatformMisc::GetLSB(ValidMask) : 0u), '.');
+    }
+    return ValidMask != 0 ? PlatformMisc::GetLSB(ValidMask) : 0u;
+}
+
+} // namespace
+
+bool RenderDeviceVkImpl::GetPeerBindingDeviceIndices(Uint32                                          CreationNodeMask,
+                                                     Uint32                                          VisibleNodeMask,
+                                                     uint32_t                                        MemoryTypeIndex,
+                                                     const char*                                     ResourceName,
+                                                     std::array<uint32_t, VK_MAX_DEVICE_GROUP_SIZE>& DeviceIndices) const
+{
+    const VulkanUtilities::LogicalDevice& LogicalDevice = *m_LogicalDevice;
+    if (!LogicalDevice.IsDeviceGroup())
+        return false;
+
+    // Default masks: every device keeps its own instance (no peer access)
+    if (CreationNodeMask == 0 && VisibleNodeMask == 0)
+        return false;
+
+    // Memory with a single instance is the same memory for every device
+    if (!LogicalDevice.IsMultiInstanceMemoryType(MemoryTypeIndex))
+        return false;
+
+    const uint32_t GroupSize    = LogicalDevice.GetDeviceGroupSize();
+    const uint32_t GroupMask    = LogicalDevice.GetDeviceGroupMask();
+    const uint32_t CreationNode = GetCreationNodeIndex(CreationNodeMask, GroupMask, ResourceName);
+    // VisibleNodeMask == 0 means the creation node only (as in D3D12)
+    const uint32_t VisibleNodes = ((VisibleNodeMask != 0 ? VisibleNodeMask : 0u) | (1u << CreationNode)) & GroupMask;
+
+    // Same as The Forge's util_calculate_device_indices(): every visible node uses the creation node's
+    // instance, the other nodes keep their own (which the resource does not use).
+    // Example: created on node 0, visible to nodes 0 and 1 of a 3-device group -> {0, 0, 2}.
+    bool NeedsPeerBinding = false;
+    for (uint32_t Device = 0; Device < GroupSize; ++Device)
+    {
+        DeviceIndices[Device] = ((VisibleNodes >> Device) & 1u) != 0 ? CreationNode : Device;
+        NeedsPeerBinding |= DeviceIndices[Device] != Device;
+    }
+
+    return NeedsPeerBinding;
+}
+
+uint32_t RenderDeviceVkImpl::GetInitialDataDeviceMask(Uint32 CreationNodeMask, Uint32 VisibleNodeMask, uint32_t MemoryTypeIndex) const
+{
+    const VulkanUtilities::LogicalDevice& LogicalDevice = *m_LogicalDevice;
+    if (!LogicalDevice.IsDeviceGroup() || !LogicalDevice.IsMultiInstanceMemoryType(MemoryTypeIndex))
+        return 0;
+
+    // Default masks: every device's instance needs the data
+    if (CreationNodeMask == 0 && VisibleNodeMask == 0)
+        return LogicalDevice.GetDeviceGroupMask();
+
+    // Explicit masks: the visible nodes are bound to the creation node's instance
+    // (an invalid CreationNodeMask is reported by GetPeerBindingDeviceIndices())
+    const Uint32 ValidMask = CreationNodeMask & LogicalDevice.GetDeviceGroupMask();
+    return 1u << (ValidMask != 0 ? PlatformMisc::GetLSB(ValidMask) : 0u);
+}
+
 void RenderDeviceVkImpl::AllocateTransientCmdPool(SoftwareQueueIndex                   CommandQueueId,
                                                   VulkanUtilities::CommandPoolWrapper& CmdPool,
                                                   VulkanUtilities::CommandBuffer&      CmdBuffer,
@@ -291,7 +364,8 @@ void RenderDeviceVkImpl::AllocateTransientCmdPool(SoftwareQueueIndex            
 
 void RenderDeviceVkImpl::ExecuteAndDisposeTransientCmdBuff(SoftwareQueueIndex                    CommandQueueId,
                                                            VkCommandBuffer                       vkCmdBuff,
-                                                           VulkanUtilities::CommandPoolWrapper&& CmdPool)
+                                                           VulkanUtilities::CommandPoolWrapper&& CmdPool,
+                                                           uint32_t                              DeviceMask)
 {
     VERIFY_EXPR(vkCmdBuff != VK_NULL_HANDLE);
 
@@ -328,7 +402,10 @@ void RenderDeviceVkImpl::ExecuteAndDisposeTransientCmdBuff(SoftwareQueueIndex   
     LockCmdQueueAndRun(CommandQueueId,
                        [&](ICommandQueueVk* pCmdQueueVk) //
                        {
-                           FenceValue = pCmdQueueVk->SubmitCmdBuffer(vkCmdBuff);
+                           // The command buffer is begun without a device mask, so it can run on any device of a group
+                           FenceValue = DeviceMask != 0 ?
+                               ClassPtrCast<CommandQueueVkImpl>(pCmdQueueVk)->SubmitCmdBufferToDevices(vkCmdBuff, DeviceMask) :
+                               pCmdQueueVk->SubmitCmdBuffer(vkCmdBuff);
                        } //
     );
 
@@ -644,6 +721,112 @@ void RenderDeviceVkImpl::CreateTexture(const TextureDesc& TexDesc, const Texture
     CreateTextureImpl(ppTexture, TexDesc, pData);
 }
 
+Bool RenderDeviceVkImpl::GetHostMemoryTextureRequirements(const TextureDesc& TexDesc, Uint64& Size, Uint64& Alignment) const
+{
+    VkDeviceSize vkSize      = 0;
+    VkDeviceSize vkAlignment = 0;
+    const bool   Supported   = TextureVkImpl::GetHostMemoryRequirements(*this, TexDesc, vkSize, vkAlignment);
+    Size                     = vkSize;
+    Alignment                = vkAlignment;
+    return Supported;
+}
+
+void RenderDeviceVkImpl::CreateTextureFromHostMemory(const TextureDesc& TexDesc, void* pHostMemory, IObject* pHostMemoryOwner, ITexture** ppTexture)
+{
+    TextureVkImpl::HostMemoryImportInfo HostMemory;
+    HostMemory.pHostMemory = pHostMemory;
+    HostMemory.pOwner      = pHostMemoryOwner;
+    CreateTextureImpl(ppTexture, TexDesc, HostMemory);
+}
+
+namespace
+{
+
+// The Vulkan specification allows sharing a semaphore through an opaque NT handle or file descriptor only
+// between devices with the same deviceUUID and driverUUID (external semaphore handle types compatibility).
+bool CanShareTimelineSemaphores(const RenderDeviceVkImpl& Device, const RenderDeviceVkImpl& OtherDevice)
+{
+    for (const RenderDeviceVkImpl* pDevice : {&Device, &OtherDevice})
+    {
+        // ExternalSemaphore also means that the identity (VkPhysicalDeviceIDProperties) has been queried
+        if (!pDevice->GetFeatures().NativeFence || !pDevice->GetLogicalDevice().GetEnabledExtFeatures().ExternalSemaphore)
+            return false;
+    }
+
+    const VkPhysicalDeviceIDProperties& ID      = Device.GetPhysicalDevice().GetExtProperties().ID;
+    const VkPhysicalDeviceIDProperties& OtherID = OtherDevice.GetPhysicalDevice().GetExtProperties().ID;
+    return std::memcmp(ID.deviceUUID, OtherID.deviceUUID, VK_UUID_SIZE) == 0 &&
+        std::memcmp(ID.driverUUID, OtherID.driverUUID, VK_UUID_SIZE) == 0;
+}
+
+} // namespace
+
+Bool RenderDeviceVkImpl::CreateSharedFence(IRenderDevice* pOtherDevice, const FenceDesc& Desc, IFence** ppFence, IFence** ppOtherFence)
+{
+    DEV_CHECK_ERR(ppFence != nullptr && ppOtherFence != nullptr, "ppFence and ppOtherFence must not be null");
+    if (ppFence == nullptr || ppOtherFence == nullptr)
+        return False;
+    *ppFence      = nullptr;
+    *ppOtherFence = nullptr;
+
+    const char* Name = Desc.Name != nullptr ? Desc.Name : "";
+    DEV_CHECK_ERR(Desc.Type == FENCE_TYPE_GENERAL, "Shared fence '", Name, "' must be created with FENCE_TYPE_GENERAL");
+    if (Desc.Type != FENCE_TYPE_GENERAL)
+        return False;
+
+    RefCntAutoPtr<IRenderDeviceVk> pOtherDeviceVk{pOtherDevice, IID_RenderDeviceVk};
+    DEV_CHECK_ERR(pOtherDeviceVk, "pOtherDevice must be a Vulkan device");
+    if (!pOtherDeviceVk)
+        return False;
+    RenderDeviceVkImpl* pOtherDeviceVkImpl = ClassPtrCast<RenderDeviceVkImpl>(pOtherDeviceVk.RawPtr());
+
+    if (!CanShareTimelineSemaphores(*this, *pOtherDeviceVkImpl))
+        return False;
+
+    try
+    {
+        const VulkanUtilities::LogicalDevice& OtherLogicalDevice = pOtherDeviceVkImpl->GetLogicalDevice();
+
+        VulkanUtilities::SemaphoreWrapper Semaphore      = m_LogicalDevice->CreateTimelineSemaphore(0, Name, /*Exportable = */ true);
+        VulkanUtilities::SemaphoreWrapper OtherSemaphore = OtherLogicalDevice.CreateTimelineSemaphore(0, Name);
+
+        const VkResult err = m_LogicalDevice->ShareSemaphore(Semaphore, OtherLogicalDevice, OtherSemaphore);
+        if (err != VK_SUCCESS)
+        {
+            LOG_WARNING_MESSAGE("Failed to share the timeline semaphore of fence '", Name, "' with another device: ", VulkanUtilities::VkResultToString(err));
+            return False;
+        }
+
+        CreateFenceFromTimelineSemaphore(std::move(Semaphore), Desc, ppFence);
+        pOtherDeviceVkImpl->CreateFenceFromTimelineSemaphore(std::move(OtherSemaphore), Desc, ppOtherFence);
+    }
+    catch (const std::runtime_error&)
+    {
+    }
+
+    if (*ppFence == nullptr || *ppOtherFence == nullptr)
+    {
+        if (*ppFence != nullptr)
+            (*ppFence)->Release();
+        if (*ppOtherFence != nullptr)
+            (*ppOtherFence)->Release();
+        *ppFence      = nullptr;
+        *ppOtherFence = nullptr;
+        return False;
+    }
+    return True;
+}
+
+void RenderDeviceVkImpl::CreateFenceFromTimelineSemaphore(VulkanUtilities::SemaphoreWrapper&& TimelineSemaphore, const FenceDesc& Desc, IFence** ppFence)
+{
+    CreateDeviceObject("Fence", Desc, ppFence,
+                       [&]() //
+                       {
+                           FenceVkImpl* pFenceVk{NEW_RC_OBJ(m_FenceAllocator, "FenceVkImpl instance", FenceVkImpl)(this, Desc, std::move(TimelineSemaphore))};
+                           pFenceVk->QueryInterface(IID_Fence, reinterpret_cast<IObject**>(ppFence));
+                       });
+}
+
 void RenderDeviceVkImpl::CreateSampler(const SamplerDesc& SamplerDesc, ISampler** ppSampler)
 {
     CreateSamplerImpl(ppSampler, SamplerDesc);
@@ -820,10 +1003,13 @@ Bool RenderDeviceVkImpl::GetSparseTextureFormatInfo(TEXTURE_FORMAT           Tex
 
     vkGetPhysicalDeviceSparseImageFormatProperties(vkDevice, vkFormat, vkType, vkSampleCount, vkDefaultUsage, VK_IMAGE_TILING_OPTIMAL, &FmtPropsCount, FmtProps);
 
+    // Tile size in texels (imageGranularity may be in compressed blocks; a sparse block is the standard block size)
+    const VkExtent3D Granularity = SparseImageGranularityToTexels(FmtProps[0].imageGranularity, TexFormat, SampleCount, m_AdapterInfo.SparseResources.StandardBlockSize);
+
     Info.BindFlags   = BIND_NONE;
-    Info.TileSize[0] = FmtProps[0].imageGranularity.width;
-    Info.TileSize[1] = FmtProps[0].imageGranularity.height;
-    Info.TileSize[2] = FmtProps[0].imageGranularity.depth;
+    Info.TileSize[0] = Granularity.width;
+    Info.TileSize[1] = Granularity.height;
+    Info.TileSize[2] = Granularity.depth;
     Info.Flags       = VkSparseImageFormatFlagsToSparseTextureFlags(FmtProps[0].flags);
 
     const auto CheckUsage = [&](VkImageUsageFlags vkUsage) {

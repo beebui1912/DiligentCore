@@ -50,12 +50,16 @@ void GetOpenXRGraphicsBindingVk(IRenderDevice*  pDevice,
     VERIFY_EXPR(pDeviceVk != nullptr);
 
     uint32_t queueFamilyIndex = 0;
+    uint32_t queueIndex       = 0;
     {
         ICommandQueue* pQueue = pContext->LockCommandQueue();
         VERIFY_EXPR(pQueue != nullptr);
         if (RefCntAutoPtr<ICommandQueueVk> pQueueVk{pQueue, IID_CommandQueueVk})
         {
             queueFamilyIndex = pQueueVk->GetQueueFamilyIndex();
+            // The index of the context's VkQueue in its family. It differs from the context id when the
+            // device has contexts in several families or contexts on different nodes share a VkQueue.
+            queueIndex = pQueueVk->GetQueueIndex();
         }
         else
         {
@@ -71,7 +75,7 @@ void GetOpenXRGraphicsBindingVk(IRenderDevice*  pDevice,
     Binding.physicalDevice              = pDeviceVk->GetVkPhysicalDevice();
     Binding.device                      = pDeviceVk->GetVkDevice();
     Binding.queueFamilyIndex            = queueFamilyIndex;
-    Binding.queueIndex                  = pContext->GetDesc().ContextId;
+    Binding.queueIndex                  = queueIndex;
 
     *ppGraphicsBinding = pDataBlob.Detach();
 }

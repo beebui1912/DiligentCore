@@ -33,6 +33,10 @@ namespace
 namespace HLSL
 {
 
+// The mesh shaders select their colors without indexing a static const array: the Intel Arc D3D12
+// driver hangs the GPU (DXGI_ERROR_DEVICE_HUNG in DispatchMesh) when a mesh shader indexes one, and
+// the lost device then fails every test that runs after it.
+
 // clang-format off
 const std::string MeshShaderTest_MS{
 R"(
@@ -42,7 +46,13 @@ struct VertexOut
     float3 Color    : COLOR0;
 };
 
-static const float3 colors[4] = {float3(1.0,0.0,0.0), float3(0.0,1.0,0.0), float3(0.0,0.0,1.0), float3(1.0,1.0,1.0)};
+// {red, green, blue, white}[i]
+float3 GetColor(uint i)
+{
+    return float3(i == 0 || i == 3 ? 1.0 : 0.0,
+                  i == 1 || i == 3 ? 1.0 : 0.0,
+                  i >= 2 ? 1.0 : 0.0);
+}
 
 [numthreads(4,1,1)]
 [outputtopology("triangle")]
@@ -66,7 +76,7 @@ void main(uint I : SV_GroupIndex,
     }
 
     verts[I].Position = float4(float(I >> 1) * 2.0 - 1.0, float(I & 1) * 2.0 - 1.0, 0.0, 1.0);
-    verts[I].Color = colors[I];
+    verts[I].Color = GetColor(I);
 }
 )"
 };
@@ -102,8 +112,14 @@ groupshared Payload s_payload;
 void main(in uint I : SV_GroupIndex,
           in uint gid : SV_GroupID)
 {
-    s_payload.baseID    = (I == 0) ? gid * 8 : 0;
+    // Only one thread may write baseID: all threads of the group share the payload,
+    // and the last write would win.
+    if (I == 0)
+        s_payload.baseID = gid * 8;
     s_payload.subIDs[I] = I;
+
+    // The writes of all threads must be visible when the payload is read
+    GroupMemoryBarrierWithGroupSync();
 
     DispatchMesh(8, 1, 1, s_payload);
 }
@@ -124,7 +140,13 @@ struct Payload
     uint subIDs[8];
 };
 
-static const float3 colors[4] = {float3(1.0,0.0,0.0), float3(0.0,1.0,0.0), float3(0.0,0.0,1.0), float3(1.0,0.0,1.0)};
+// {red, green, blue, magenta}[i]
+float3 GetColor(uint i)
+{
+    return float3(i == 0 || i == 3 ? 1.0 : 0.0,
+                  i == 1 ? 1.0 : 0.0,
+                  i >= 2 ? 1.0 : 0.0);
+}
 
 [numthreads(1,1,1)]
 [outputtopology("triangle")]
@@ -148,9 +170,9 @@ void main(in uint gid : SV_GroupID,
     verts[1].Position = float4(center.x - 0.09, center.y - 0.09, 0.0, 1.0);
     verts[2].Position = float4(center.x + 0.09, center.y - 0.09, 0.0, 1.0);
 
-    verts[0].Color = colors[meshletID & 3];
-    verts[1].Color = colors[meshletID & 3];
-    verts[2].Color = colors[meshletID & 3];
+    verts[0].Color = GetColor(meshletID & 3);
+    verts[1].Color = GetColor(meshletID & 3);
+    verts[2].Color = GetColor(meshletID & 3);
 }
 )"
 };

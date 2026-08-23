@@ -28,6 +28,8 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
+#include <unordered_set>
 #include "PhysicalDevice.hpp"
 
 namespace VulkanUtilities
@@ -99,8 +101,15 @@ public:
         const VkPhysicalDeviceFeatures&    EnabledFeatures;
         const ExtensionFeatures&           EnabledExtFeatures;
         const VkAllocationCallbacks* const vkAllocator;
+
+        // Linked multi-GPU: number of physical devices of the device group the logical device was
+        // created with (VkDeviceGroupDeviceCreateInfo::physicalDeviceCount). 1 for an ordinary device.
+        uint32_t DeviceGroupSize = 1;
     };
     static std::shared_ptr<LogicalDevice> Create(const CreateInfo& CI);
+
+    // Number of logical devices that are currently alive in the process
+    static uint32_t GetLiveDeviceCount();
 
     // clang-format off
     LogicalDevice             (const LogicalDevice&) = delete;
@@ -128,6 +137,27 @@ public:
         return m_VkDevice;
     }
 
+#if DILIGENT_USE_VOLK
+    // Per-device function-pointer table. Unlike volkLoadDevice() (which rebinds the single set of
+    // global pointers to one device), a dedicated table lets multiple Vulkan devices coexist and
+    // each dispatch its own optimized device-level entry points. Used for command recording
+    // (VulkanUtilities::CommandBuffer); other calls use the global pointers.
+    const VolkDeviceTable& GetVkTable() const { return m_VkTable; }
+#endif
+
+    // Linked multi-GPU (Vulkan device group). An ordinary device is a group of one device.
+    uint32_t GetDeviceGroupSize() const { return m_DeviceGroupSize; }
+    bool     IsDeviceGroup() const { return m_DeviceGroupSize > 1; }
+    uint32_t GetDeviceGroupMask() const { return m_DeviceGroupSize >= 32u ? ~0u : (1u << m_DeviceGroupSize) - 1u; }
+
+    // True if, in a device group, an allocation of this memory type has one instance on every
+    // physical device (VK_MEMORY_HEAP_MULTI_INSTANCE_BIT). Always false for an ordinary device.
+    bool IsMultiInstanceMemoryType(uint32_t MemoryTypeIndex) const;
+
+    // How LocalDeviceIndex can access the instance of RemoteDeviceIndex of memory of this type
+    // (vkGetDeviceGroupPeerMemoryFeatures). 0 for an ordinary device.
+    VkPeerMemoryFeatureFlags GetPeerMemoryFeatures(uint32_t MemoryTypeIndex, uint32_t LocalDeviceIndex, uint32_t RemoteDeviceIndex) const;
+
     void WaitIdle() const;
 
     // clang-format off
@@ -153,7 +183,8 @@ public:
     DescriptorSetLayoutWrapper CreateDescriptorSetLayout(const VkDescriptorSetLayoutCreateInfo& LayoutCI,       const char* DebugName = "") const;
 
     SemaphoreWrapper    CreateSemaphore(const VkSemaphoreCreateInfo& SemaphoreCI, const char* DebugName = "") const;
-    SemaphoreWrapper    CreateTimelineSemaphore(uint64_t InitialValue, const char* DebugName = "") const;
+    // Exportable: the payload can be shared with another device (ShareSemaphore()), requires ExtensionFeatures::ExternalSemaphore
+    SemaphoreWrapper    CreateTimelineSemaphore(uint64_t InitialValue, const char* DebugName = "", bool Exportable = false) const;
     QueryPoolWrapper    CreateQueryPool(const VkQueryPoolCreateInfo& QueryPoolCI, const char* DebugName = "") const;
     AccelStructWrapper  CreateAccelStruct(const VkAccelerationStructureCreateInfoKHR& CI, const char* DebugName = "") const;
 
@@ -191,10 +222,28 @@ public:
 
     VkResult BindBufferMemory(VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset) const;
     VkResult BindImageMemory (VkImage image,   VkDeviceMemory memory, VkDeviceSize memoryOffset) const;
+
+    // Linked multi-GPU: pDeviceIndices is null, or holds GetDeviceGroupSize() elements: element i is the
+    // device whose instance of the memory device i uses (VkBind*MemoryDeviceGroupInfo::pDeviceIndices).
+    // Ignored for an ordinary device, where these are the same as the functions above.
+    VkResult BindBufferMemory(VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset, const uint32_t* pDeviceIndices) const;
+    VkResult BindImageMemory (VkImage image,   VkDeviceMemory memory, VkDeviceSize memoryOffset, const uint32_t* pDeviceIndices) const;
     // clang-format on
 
     VkResult MapMemory(VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void** ppData) const;
     void     UnmapMemory(VkDeviceMemory memory) const;
+
+    // VK_EXT_external_memory_host: the memory types into which the host allocation can be imported.
+    // Returns VK_ERROR_EXTENSION_NOT_PRESENT if the extension is not enabled.
+    VkResult GetMemoryHostPointerProperties(const void* pHostPointer, VkMemoryHostPointerPropertiesEXT& Properties) const;
+
+    // Exports the payload of Semaphore, a timeline semaphore of this device created as exportable, through
+    // ExternalSemaphoreHandleType, and permanently imports it into ImportingSemaphore, a timeline semaphore of
+    // ImportingDevice. Both semaphores then refer to one payload. The handle is closed (Windows) or owned by the
+    // implementation (file descriptors) when the function returns.
+    // The devices must use the same physical device and driver (equal VkPhysicalDeviceIDProperties::deviceUUID and
+    // driverUUID). Returns VK_ERROR_EXTENSION_NOT_PRESENT if a device does not have ExternalSemaphore enabled.
+    VkResult ShareSemaphore(VkSemaphore Semaphore, const LogicalDevice& ImportingDevice, VkSemaphore ImportingSemaphore) const;
 
     VkResult InvalidateMappedMemoryRanges(uint32_t memoryRangeCount, const VkMappedMemoryRange* pMemoryRanges) const;
     VkResult FlushMappedMemoryRanges(uint32_t memoryRangeCount, const VkMappedMemoryRange* pMemoryRanges) const;
@@ -262,12 +311,35 @@ private:
                                                              const char*                   DebugName,
                                                              const char*                   ObjectType) const;
 
+#if DILIGENT_USE_VOLK
+#    if defined(VK_USE_PLATFORM_WIN32_KHR)
+    VkResult ShareSemaphoreWin32(VkSemaphore Semaphore, const LogicalDevice& ImportingDevice, VkSemaphore ImportingSemaphore) const;
+#    endif
+    // Used on the platforms other than Windows. Compiled on every platform, so that this code is built everywhere.
+    VkResult ShareSemaphoreFd(VkSemaphore Semaphore, const LogicalDevice& ImportingDevice, VkSemaphore ImportingSemaphore) const;
+#endif
+
     VkDevice                           m_VkDevice = VK_NULL_HANDLE;
     const VkAllocationCallbacks* const m_VkAllocator;
     const VkPhysicalDeviceFeatures     m_EnabledFeatures;
     ExtensionFeatures                  m_EnabledExtFeatures = {};
     std::vector<VkPipelineStageFlags>  m_SupportedStagesMask;
     std::vector<VkAccessFlags>         m_SupportedAccessMask;
+
+    const uint32_t                   m_DeviceGroupSize;
+    VkPhysicalDeviceMemoryProperties m_MemoryProperties{};
+
+    // Linked multi-GPU: host-visible memory of a multi-instance heap is allocated on device 0 only,
+    // because memory with several instances cannot be mapped (VUID-vkMapMemory-memory-00683).
+    // Every device of the group then binds resources to that one instance.
+    bool IsDevice0OnlyMemory(VkDeviceMemory Memory) const;
+
+    mutable std::mutex                         m_Device0OnlyMemoryMtx;
+    mutable std::unordered_set<VkDeviceMemory> m_Device0OnlyMemory;
+
+#if DILIGENT_USE_VOLK
+    VolkDeviceTable m_VkTable{};
+#endif
 };
 
 } // namespace VulkanUtilities

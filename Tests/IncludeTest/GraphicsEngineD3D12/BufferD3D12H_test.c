@@ -36,4 +36,6 @@ void TestBufferD3D12_CInterface(IBufferD3D12* pBuffer)
     IBufferD3D12_SetD3D12ResourceState(pBuffer, RESOURCE_STATE_CONSTANT_BUFFER);
     RESOURCE_STATE State = IBufferD3D12_GetD3D12ResourceState(pBuffer);
     (void)State;
+    ID3D12Heap* pSharedHeap = IBufferD3D12_GetD3D12SharedHeap(pBuffer);
+    (void)pSharedHeap;
 }

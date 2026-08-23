@@ -92,6 +92,13 @@ DILIGENT_BEGIN_INTERFACE(ICommandQueueVk, ICommandQueue)
     VIRTUAL void METHOD(EnqueueSignal)(THIS_
                                        VkSemaphore vkTimelineSemaphore,
                                        Uint64      Value) PURE;
+
+    /// Returns the index of the VkQueue within its queue family (the queueIndex of vkGetDeviceQueue).
+
+    /// \note  It differs from the index of the immediate context (DeviceContextDesc::ContextId) when
+    ///        the device has contexts in several queue families, or when contexts on different nodes
+    ///        of a linked device share a VkQueue.
+    VIRTUAL uint32_t METHOD(GetQueueIndex)(THIS) CONST PURE;
 };
 DILIGENT_END_INTERFACE
 
@@ -109,6 +116,7 @@ DILIGENT_END_INTERFACE
 #    define ICommandQueueVk_EnqueueSignalFence(This, ...)     CALL_IFACE_METHOD(CommandQueueVk, EnqueueSignalFence,     This, __VA_ARGS__)
 #    define ICommandQueueVk_EnqueueSignal(This, ...)          CALL_IFACE_METHOD(CommandQueueVk, EnqueueSignal,          This, __VA_ARGS__)
 #    define ICommandQueueVk_BindSparse(This, ...)             CALL_IFACE_METHOD(CommandQueueVk, BindSparse,             This, __VA_ARGS__)
+#    define ICommandQueueVk_GetQueueIndex(This)               CALL_IFACE_METHOD(CommandQueueVk, GetQueueIndex,          This)
 
 // clang-format on
 

@@ -36,6 +36,17 @@ namespace VulkanUtilities
 {
 using Diligent::HardwareQueueIndex;
 
+// Handle type through which a semaphore is shared with another Vulkan device: an NT handle on Windows
+// (VK_KHR_external_semaphore_win32) and a POSIX file descriptor on the other platforms (VK_KHR_external_semaphore_fd).
+// Both are core-specified external handle types; whether a device supports them is queried at run time.
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+constexpr VkExternalSemaphoreHandleTypeFlagBits ExternalSemaphoreHandleType    = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+constexpr const char*                           ExternalSemaphoreExtensionName = VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME;
+#else
+constexpr VkExternalSemaphoreHandleTypeFlagBits ExternalSemaphoreHandleType    = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+constexpr const char*                           ExternalSemaphoreExtensionName = VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME;
+#endif
+
 class PhysicalDevice
 {
 public:
@@ -79,6 +90,8 @@ public:
         bool HasPortabilitySubset = false;
         bool RenderPass2          = false;
         bool DrawIndirectCount    = false;
+        bool ExternalMemoryHost   = false; // VK_EXT_external_memory_host, requires Vulkan 1.1
+        bool ExternalSemaphore    = false; // Timeline semaphores can be exported and imported with ExternalSemaphoreHandleType, requires Vulkan 1.1
     };
 
     struct ExtensionProperties
@@ -99,6 +112,8 @@ public:
         VkPhysicalDeviceMultiDrawPropertiesEXT                 MultiDraw                 = {};
         VkPhysicalDeviceHostImageCopyPropertiesEXT             HostImageCopy             = {};
         VkPhysicalDeviceFragmentShaderBarycentricPropertiesKHR FragmentShaderBarycentric = {};
+        VkPhysicalDeviceExternalMemoryHostPropertiesEXT        ExternalMemoryHost        = {};
+        VkPhysicalDeviceIDProperties                           ID                        = {}; // Requires Vulkan 1.1
 
         std::unique_ptr<VkImageLayout[]> HostImageCopyLayouts;
     };

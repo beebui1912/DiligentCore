@@ -26,3 +26,9 @@
  */
 
 #include "DiligentCore/Graphics/GraphicsTools/interface/GraphicsUtilities.h"
+
+void TestGraphicsUtilitiesCInterface(IRenderDevice* pDevice, IRenderDevice* pOtherDevice)
+{
+    Bool Shared = Diligent_CreateCrossDeviceFence(pDevice, pOtherDevice, (const FenceDesc*)NULL, (IFence**)NULL, (IFence**)NULL);
+    (void)Shared;
+}

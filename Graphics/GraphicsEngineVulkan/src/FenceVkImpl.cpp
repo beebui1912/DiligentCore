@@ -76,6 +76,27 @@ FenceVkImpl::FenceVkImpl(IReferenceCounters* pRefCounters,
         LOG_ERROR_AND_THROW("Feature NativeFence is not enabled, can not create fence from Vulkan timeline semaphore.");
 }
 
+FenceVkImpl::FenceVkImpl(IReferenceCounters*                 pRefCounters,
+                         RenderDeviceVkImpl*                 pRenderDeviceVkImpl,
+                         const FenceDesc&                    Desc,
+                         VulkanUtilities::SemaphoreWrapper&& TimelineSemaphore) :
+    // clang-format off
+    TFenceBase
+    {
+        pRefCounters,
+        pRenderDeviceVkImpl,
+        Desc,
+        false
+    },
+    m_TimelineSemaphore{std::move(TimelineSemaphore)}
+// clang-format on
+{
+    if (!pRenderDeviceVkImpl->GetFeatures().NativeFence)
+        LOG_ERROR_AND_THROW("Feature NativeFence is not enabled, can not create fence from Vulkan timeline semaphore.");
+    if (static_cast<VkSemaphore>(m_TimelineSemaphore) == VK_NULL_HANDLE)
+        LOG_ERROR_AND_THROW("Timeline semaphore must not be null");
+}
+
 FenceVkImpl::~FenceVkImpl()
 {
     if (IsTimelineSemaphore())

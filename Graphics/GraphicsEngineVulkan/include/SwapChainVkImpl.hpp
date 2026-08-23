@@ -92,6 +92,10 @@ private:
     void     ReleaseSwapChainResources(DeviceContextVkImpl* pImmediateCtxVk, bool DestroyVkSwapChain);
     void     ThrottleFrameSubmission();
 
+    // Linked multi-GPU: selects which device's instance of the swap chain images is presented and how
+    // (m_PresentDeviceMask, m_DeviceGroupPresentMode); returns the modes for VkDeviceGroupSwapchainCreateInfoKHR.
+    VkDeviceGroupPresentModeFlagsKHR SelectDeviceGroupPresentMode();
+
     const NativeWindow m_Window;
 
     std::shared_ptr<const VulkanUtilities::Instance> m_Instance;
@@ -128,6 +132,11 @@ private:
     bool     m_VSyncEnabled    = true;
     bool     m_ImageAcquired   = false;
     Uint32   m_FrameIndex      = 1;
+
+    // Linked multi-GPU: the swap chain context's node renders into its own instance of the back buffer,
+    // and that instance is presented (VkDeviceGroupPresentInfoKHR). Node 0, LOCAL by default.
+    uint32_t                            m_PresentDeviceMask      = 1;
+    VkDeviceGroupPresentModeFlagBitsKHR m_DeviceGroupPresentMode = VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR;
 };
 
 } // namespace Diligent

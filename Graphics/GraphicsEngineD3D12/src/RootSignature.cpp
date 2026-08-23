@@ -253,7 +253,8 @@ RootSignatureD3D12::RootSignatureD3D12(IReferenceCounters*                      
 
         ID3D12Device* pd3d12Device = pDeviceD3D12Impl->GetD3D12Device();
 
-        hr = pd3d12Device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), __uuidof(m_pd3d12RootSignature), reinterpret_cast<void**>(static_cast<ID3D12RootSignature**>(&m_pd3d12RootSignature)));
+        // Node mask 0 unless the device uses linked nodes; all of them otherwise (see GetSharedNodeMask())
+        hr = pd3d12Device->CreateRootSignature(pDeviceD3D12Impl->GetSharedNodeMask(), signature->GetBufferPointer(), signature->GetBufferSize(), __uuidof(m_pd3d12RootSignature), reinterpret_cast<void**>(static_cast<ID3D12RootSignature**>(&m_pd3d12RootSignature)));
         CHECK_D3D_RESULT_THROW(hr, "Failed to create root signature");
     }
 }
@@ -278,7 +279,7 @@ bool LocalRootSignatureD3D12::IsShaderRecord(const D3DShaderResourceAttribs& CB)
             m_Name == CB.Name);
 }
 
-bool LocalRootSignatureD3D12::Create(ID3D12Device* pDevice, Uint32 RegisterSpace)
+bool LocalRootSignatureD3D12::Create(ID3D12Device* pDevice, Uint32 RegisterSpace, UINT NodeMask)
 {
     if (m_ShaderRecordSize == 0)
         return false;
@@ -303,7 +304,7 @@ bool LocalRootSignatureD3D12::Create(ID3D12Device* pDevice, Uint32 RegisterSpace
     HRESULT           hr = D3D12SerializeRootSignature(&d3d12RootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, nullptr);
     CHECK_D3D_RESULT_THROW(hr, "Failed to serialize local root signature");
 
-    hr = pDevice->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&m_pd3d12RootSignature));
+    hr = pDevice->CreateRootSignature(NodeMask, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&m_pd3d12RootSignature));
     CHECK_D3D_RESULT_THROW(hr, "Failed to create D3D12 local root signature");
 
     return true;

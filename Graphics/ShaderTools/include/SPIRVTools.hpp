@@ -55,6 +55,11 @@ std::vector<uint32_t> OptimizeSPIRV(const std::vector<uint32_t>& SrcSPIRV,
 /// This function modifies the storage class of the specified variable from Uniform to PushConstant,
 /// and removes Binding and DescriptorSet decorations.
 ///
+/// \note  Arrays in a push constant block must only be accessed by dynamically uniform indices
+///        (VUID-RuntimeSpirv-None-04745), which is not required for a uniform buffer. The shader must
+///        not index an array in the block with a per-vertex or per-pixel value such as SV_VertexID:
+///        the conversion does not check this, and some GPUs then read wrong values.
+///
 /// \param [in] SPIRV      - Source SPIR-V bytecode
 /// \param [in] BlockName  - Name of the uniform buffer block to convert
 /// \return Modified SPIR-V bytecode, or empty vector on failure

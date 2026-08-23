@@ -96,7 +96,12 @@ TopLevelASVkImpl::TopLevelASVkImpl(IReferenceCounters*   pRefCounters,
     m_MemoryAlignedOffset = AlignUp(VkDeviceSize{m_MemoryAllocation.UnalignedOffset}, MemReqs.alignment);
     VERIFY(m_MemoryAllocation.Size >= MemReqs.size + (m_MemoryAlignedOffset - m_MemoryAllocation.UnalignedOffset), "Size of memory allocation is too small");
     VkDeviceMemory Memory = m_MemoryAllocation.Page->GetVkMemory();
-    VkResult       err    = LogicalDevice.BindBufferMemory(m_VulkanBuffer, Memory, m_MemoryAlignedOffset);
+
+    // Linked multi-GPU: nodes in VisibleNodeMask use the creation node's instance of the memory
+    std::array<uint32_t, VK_MAX_DEVICE_GROUP_SIZE> PeerDeviceIndices{};
+    const bool                                     PeerBinding = pRenderDeviceVk->GetPeerBindingDeviceIndices(m_Desc.CreationNodeMask, m_Desc.VisibleNodeMask, MemoryTypeIndex, m_Desc.Name, PeerDeviceIndices);
+
+    VkResult err = LogicalDevice.BindBufferMemory(m_VulkanBuffer, Memory, m_MemoryAlignedOffset, PeerBinding ? PeerDeviceIndices.data() : nullptr);
     CHECK_VK_ERROR_AND_THROW(err, "Failed to bind buffer memory");
 
     VkAccelerationStructureCreateInfoKHR vkAccelStrCI{};

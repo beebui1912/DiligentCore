@@ -520,9 +520,24 @@ const ShaderResourceCacheD3D12::Resource& ShaderResourceCacheD3D12::CopyResource
 
             D3D12_CPU_DESCRIPTOR_HANDLE DstDescrHandle = GetDescriptorTableHandle<D3D12_CPU_DESCRIPTOR_HANDLE>(
                 HeapType, ROOT_PARAMETER_GROUP_STATIC_MUTABLE, RootIndex, OffsetFromTableStart);
+
+            // Linked multi-GPU: the static/mutable allocation may have per-node mirror copies on the
+            // other nodes' shader-visible heaps. The descriptor must be written into every node's heap
+            // so it is reachable from whichever node records the commands. The source handle is a
+            // CPU-only (non shader-visible) descriptor, which is a valid copy source for every node.
+            // For single-GPU, GetNodeMirrorCount() is 0 and this loop does not run.
+            const DescriptorHeapAllocation& StaticMutableAlloc = GetDescriptorAllocation(HeapType, ROOT_PARAMETER_GROUP_STATIC_MUTABLE);
+            const Uint32                     NodeMirrorCount    = StaticMutableAlloc.GetNodeMirrorCount();
+            const Uint32                     OffsetInAllocation = GetRootTable(RootIndex).GetStartOffset() + OffsetFromTableStart;
+
             if (DstRes.CPUDescriptorHandle.ptr != 0)
             {
                 pd3d12Device->CopyDescriptorsSimple(1, DstDescrHandle, SrcRes.CPUDescriptorHandle, HeapType);
+                for (Uint32 node = 1; node <= NodeMirrorCount; ++node)
+                {
+                    D3D12_CPU_DESCRIPTOR_HANDLE MirrorDst = StaticMutableAlloc.GetNodeCpuHandle(node, OffsetInAllocation);
+                    pd3d12Device->CopyDescriptorsSimple(1, MirrorDst, SrcRes.CPUDescriptorHandle, HeapType);
+                }
             }
             else
             {
@@ -531,6 +546,11 @@ const ShaderResourceCacheD3D12::Resource& ShaderResourceCacheD3D12::CopyResource
                 VERIFY(DstRes.BufferRangeSize < pBuffer->GetDesc().Size, "Null CPU descriptor is only allowed for partial views of constant buffers");
                 VERIFY(DstRes.BufferRangeSize < D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16, "Constant buffer range must not exceed 64Kb");
                 pBuffer->CreateCBV(DstDescrHandle, DstRes.BufferBaseOffset, DstRes.BufferRangeSize);
+                for (Uint32 node = 1; node <= NodeMirrorCount; ++node)
+                {
+                    D3D12_CPU_DESCRIPTOR_HANDLE MirrorDst = StaticMutableAlloc.GetNodeCpuHandle(node, OffsetInAllocation);
+                    pBuffer->CreateCBV(MirrorDst, DstRes.BufferBaseOffset, DstRes.BufferRangeSize);
+                }
             }
         }
     }

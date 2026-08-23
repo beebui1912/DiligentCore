@@ -45,6 +45,11 @@ public:
     FenceD3D12Impl(IReferenceCounters*    pRefCounters,
                    RenderDeviceD3D12Impl* pDevice,
                    const FenceDesc&       Desc);
+    // Uses an existing D3D12 fence (e.g. a fence shared with another device)
+    FenceD3D12Impl(IReferenceCounters*    pRefCounters,
+                   RenderDeviceD3D12Impl* pDevice,
+                   const FenceDesc&       Desc,
+                   ID3D12Fence*           pd3d12Fence);
     ~FenceD3D12Impl();
 
     IMPLEMENT_QUERY_INTERFACE_IN_PLACE(IID_FenceD3D12, TFenceBase)

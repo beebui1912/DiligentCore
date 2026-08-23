@@ -160,7 +160,8 @@ public:
             Desc.IsDeferred ? COMMAND_QUEUE_TYPE_UNKNOWN : Desc.QueueType,
             Desc.IsDeferred,
             Desc.ContextId,
-            Desc.QueueId
+            Desc.QueueId,
+            Desc.NodeIndex
         },
         m_NativeMultiDrawSupported{pRenderDevice->GetDeviceInfo().Features.NativeMultiDraw != DEVICE_FEATURE_STATE_DISABLED}
     // clang-format on

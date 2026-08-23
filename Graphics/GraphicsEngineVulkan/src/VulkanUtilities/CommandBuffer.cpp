@@ -32,6 +32,13 @@
 namespace VulkanUtilities
 {
 
+#if DILIGENT_USE_VOLK
+// Route the barrier command through the command buffer's per-device function table (see
+// CommandBuffer.hpp). Falls back to the global (trampolined) pointer when the table is not assigned.
+// The preprocessor does not expand macros inside string literals, so log messages are unaffected.
+#    define vkCmdPipelineBarrier (m_pVkTable != nullptr ? m_pVkTable->vkCmdPipelineBarrier : ::vkCmdPipelineBarrier)
+#endif
+
 namespace
 {
 
@@ -237,6 +244,44 @@ void CommandBuffer::MemoryBarrier(VkAccessFlags        srcAccessMask,
     m_Barrier.MemoryDstAccess |= dstAccessMask;
 }
 
+void CommandBuffer::MemoryBarrierThroughHost(VkAccessFlags        srcAccessMask,
+                                             VkAccessFlags        dstAccessMask,
+                                             VkPipelineStageFlags SrcStages,
+                                             VkPipelineStageFlags DstStages)
+{
+    EndRenderScope();
+    FlushBarriers();
+
+    VERIFY_EXPR(m_VkCmdBuffer != VK_NULL_HANDLE);
+    VERIFY_EXPR((SrcStages & m_Barrier.SupportedStagesMask) != 0);
+    VERIFY_EXPR((DstStages & m_Barrier.SupportedStagesMask) != 0);
+
+    constexpr VkAccessFlags HostAccess = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT;
+
+    VkMemoryBarrier vkMemBarrier{};
+    vkMemBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    vkMemBarrier.pNext         = nullptr;
+    vkMemBarrier.srcAccessMask = srcAccessMask & m_Barrier.SupportedAccessMask;
+    vkMemBarrier.dstAccessMask = HostAccess;
+    vkCmdPipelineBarrier(m_VkCmdBuffer,
+                         SrcStages & m_Barrier.SupportedStagesMask,
+                         VK_PIPELINE_STAGE_HOST_BIT,
+                         0, // dependencyFlags
+                         1, &vkMemBarrier,
+                         0, nullptr,
+                         0, nullptr);
+
+    vkMemBarrier.srcAccessMask = HostAccess;
+    vkMemBarrier.dstAccessMask = dstAccessMask & m_Barrier.SupportedAccessMask;
+    vkCmdPipelineBarrier(m_VkCmdBuffer,
+                         VK_PIPELINE_STAGE_HOST_BIT,
+                         DstStages & m_Barrier.SupportedStagesMask,
+                         0, // dependencyFlags
+                         1, &vkMemBarrier,
+                         0, nullptr,
+                         0, nullptr);
+}
+
 void CommandBuffer::FlushBarriers()
 {
     if (m_Barrier.MemorySrcStages == 0 && m_Barrier.MemoryDstStages == 0 && m_ImageBarriers.empty())
@@ -280,5 +325,9 @@ void CommandBuffer::FlushBarriers()
     m_Barrier.MemoryDstAccess = 0;
     // Do not clear SupportedStagesMask and SupportedAccessMask
 }
+
+#if DILIGENT_USE_VOLK
+#    undef vkCmdPipelineBarrier
+#endif
 
 } // namespace VulkanUtilities

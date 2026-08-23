@@ -564,6 +564,16 @@ void UAVBarrier(const RTContext& Ctx, ID3D12Resource* pResource)
     Ctx.pCmdList->ResourceBarrier(1, &Barrier);
 }
 
+// An acceleration structure build must complete before the next build reads it (the TLAS build reads
+// the BLAS) or reuses its scratch buffer, and before rays are traced against it. A UAV barrier on the
+// scratch buffer alone does not cover the BLAS, and without a barrier after the TLAS build the rays may
+// see an unfinished TLAS: some implementations (e.g. Intel Arc) then report misses for every ray.
+// A UAV barrier without a resource covers all of these.
+void ASBuildBarrier(const RTContext& Ctx)
+{
+    UAVBarrier(Ctx, nullptr);
+}
+
 } // namespace
 
 
@@ -640,7 +650,7 @@ void RayTracingTriangleClosestHitReferenceD3D12(ISwapChain* pSwapChain)
 
         Ctx.pCmdList->BuildRaytracingAccelerationStructure(&BLASDesc, 0, nullptr);
 
-        UAVBarrier(Ctx, Ctx.pScratchBuffer);
+        ASBuildBarrier(Ctx);
 
         TopLevelInputs.InstanceDescs = Ctx.pInstanceBuffer->GetGPUVirtualAddress();
 
@@ -652,6 +662,8 @@ void RayTracingTriangleClosestHitReferenceD3D12(ISwapChain* pSwapChain)
         ASSERT_TRUE(TLASDesc.ScratchAccelerationStructureData != 0);
 
         Ctx.pCmdList->BuildRaytracingAccelerationStructure(&TLASDesc, 0, nullptr);
+
+        ASBuildBarrier(Ctx);
     }
 
     Ctx.ClearRenderTarget(pTestingSwapChainD3D12);
@@ -774,7 +786,7 @@ void RayTracingTriangleAnyHitReferenceD3D12(ISwapChain* pSwapChain)
 
         Ctx.pCmdList->BuildRaytracingAccelerationStructure(&BLASDesc, 0, nullptr);
 
-        UAVBarrier(Ctx, Ctx.pScratchBuffer);
+        ASBuildBarrier(Ctx);
 
         TopLevelInputs.InstanceDescs = Ctx.pInstanceBuffer->GetGPUVirtualAddress();
 
@@ -786,6 +798,8 @@ void RayTracingTriangleAnyHitReferenceD3D12(ISwapChain* pSwapChain)
         ASSERT_TRUE(TLASDesc.ScratchAccelerationStructureData != 0);
 
         Ctx.pCmdList->BuildRaytracingAccelerationStructure(&TLASDesc, 0, nullptr);
+
+        ASBuildBarrier(Ctx);
     }
 
     Ctx.ClearRenderTarget(pTestingSwapChainD3D12);
@@ -905,7 +919,7 @@ void RayTracingProceduralIntersectionReferenceD3D12(ISwapChain* pSwapChain)
 
         Ctx.pCmdList->BuildRaytracingAccelerationStructure(&BLASDesc, 0, nullptr);
 
-        UAVBarrier(Ctx, Ctx.pScratchBuffer);
+        ASBuildBarrier(Ctx);
 
         TopLevelInputs.InstanceDescs = Ctx.pInstanceBuffer->GetGPUVirtualAddress();
 
@@ -917,6 +931,8 @@ void RayTracingProceduralIntersectionReferenceD3D12(ISwapChain* pSwapChain)
         ASSERT_TRUE(TLASDesc.ScratchAccelerationStructureData != 0);
 
         Ctx.pCmdList->BuildRaytracingAccelerationStructure(&TLASDesc, 0, nullptr);
+
+        ASBuildBarrier(Ctx);
     }
 
     Ctx.ClearRenderTarget(pTestingSwapChainD3D12);
@@ -1114,7 +1130,7 @@ void RayTracingMultiGeometryReferenceD3D12(ISwapChain* pSwapChain)
 
         Ctx.pCmdList->BuildRaytracingAccelerationStructure(&BLASDesc, 0, nullptr);
 
-        UAVBarrier(Ctx, Ctx.pScratchBuffer);
+        ASBuildBarrier(Ctx);
 
         TopLevelInputs.InstanceDescs = Ctx.pInstanceBuffer->GetGPUVirtualAddress();
 
@@ -1126,6 +1142,8 @@ void RayTracingMultiGeometryReferenceD3D12(ISwapChain* pSwapChain)
         ASSERT_TRUE(TLASDesc.ScratchAccelerationStructureData != 0);
 
         Ctx.pCmdList->BuildRaytracingAccelerationStructure(&TLASDesc, 0, nullptr);
+
+        ASBuildBarrier(Ctx);
     }
 
     // update descriptors

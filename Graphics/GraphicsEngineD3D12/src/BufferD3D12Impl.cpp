@@ -61,6 +61,34 @@ BufferD3D12Impl::BufferD3D12Impl(IReferenceCounters*        pRefCounters,
         LOG_ERROR_AND_THROW("Unified resources are not supported in Direct3D12");
     }
 
+    // Validate multi-GPU node masks against adapter capabilities
+    if (m_Desc.CreationNodeMask != 0)
+    {
+        const Uint32 ValidNodeMask = pRenderDeviceD3D12->GetAdapterInfo().NodeMask;
+        if ((m_Desc.CreationNodeMask & ~ValidNodeMask) != 0)
+        {
+            LOG_WARNING_MESSAGE("BufferDesc.CreationNodeMask (0x", std::hex, m_Desc.CreationNodeMask,
+                                ") contains bits outside of the adapter's valid NodeMask (0x", ValidNodeMask, std::dec,
+                                "). Clamping to valid mask.");
+            m_Desc.CreationNodeMask &= ValidNodeMask;
+            if (m_Desc.CreationNodeMask == 0)
+                m_Desc.CreationNodeMask = 1;
+        }
+    }
+    if (m_Desc.VisibleNodeMask != 0)
+    {
+        const Uint32 ValidNodeMask = pRenderDeviceD3D12->GetAdapterInfo().NodeMask;
+        if ((m_Desc.VisibleNodeMask & ~ValidNodeMask) != 0)
+        {
+            LOG_WARNING_MESSAGE("BufferDesc.VisibleNodeMask (0x", std::hex, m_Desc.VisibleNodeMask,
+                                ") contains bits outside of the adapter's valid NodeMask (0x", ValidNodeMask, std::dec,
+                                "). Clamping to valid mask.");
+            m_Desc.VisibleNodeMask &= ValidNodeMask;
+            if (m_Desc.VisibleNodeMask == 0)
+                m_Desc.VisibleNodeMask = m_Desc.CreationNodeMask != 0 ? m_Desc.CreationNodeMask : 1;
+        }
+    }
+
     Uint32 BufferAlignment = 1;
     if (m_Desc.BindFlags & BIND_UNIFORM_BUFFER)
         BufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
@@ -104,6 +132,10 @@ BufferD3D12Impl::BufferD3D12Impl(IReferenceCounters*        pRefCounters,
         if (!(m_Desc.BindFlags & BIND_SHADER_RESOURCE) && !(m_Desc.BindFlags & BIND_RAY_TRACING))
             d3d12BuffDesc.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
 
+        const bool IsSharedCrossAdapter = (m_Desc.MiscFlags & MISC_BUFFER_FLAG_SHARED_CROSS_ADAPTER) != 0;
+        if (IsSharedCrossAdapter)
+            d3d12BuffDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;
+
         ID3D12Device* pd3d12Device = pRenderDeviceD3D12->GetD3D12Device();
 
         if (m_Desc.Usage == USAGE_SPARSE)
@@ -133,8 +165,9 @@ BufferD3D12Impl::BufferD3D12Impl(IReferenceCounters*        pRefCounters,
                 SetState(RESOURCE_STATE_GENERIC_READ);
             HeapProps.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
             HeapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-            HeapProps.CreationNodeMask     = 1;
-            HeapProps.VisibleNodeMask      = 1;
+            // Use descriptor node masks for linked multi-GPU; fall back to node 1 (default single-GPU node) when unset.
+            HeapProps.CreationNodeMask     = m_Desc.CreationNodeMask != 0 ? m_Desc.CreationNodeMask : 1;
+            HeapProps.VisibleNodeMask      = m_Desc.VisibleNodeMask  != 0 ? m_Desc.VisibleNodeMask  : HeapProps.CreationNodeMask;
 
             const Uint64 InitialDataSize = (pBuffData != nullptr && pBuffData->pData != nullptr) ?
                 std::min(pBuffData->DataSize, d3d12BuffDesc.Width) :
@@ -163,11 +196,37 @@ BufferD3D12Impl::BufferD3D12Impl(IReferenceCounters*        pRefCounters,
                 D3D12_HEAP_FLAG_CREATE_NOT_ZEROED :
                 D3D12_HEAP_FLAG_NONE;
 
-            HRESULT hr = pd3d12Device->CreateCommittedResource(
-                &HeapProps, d3d12HeapFlags, &d3d12BuffDesc, d3d12State,
-                nullptr, // pOptimizedClearValue
-                __uuidof(m_pd3d12Resource),
-                reinterpret_cast<void**>(static_cast<ID3D12Resource**>(&m_pd3d12Resource)));
+            HRESULT hr = E_FAIL;
+            if (IsSharedCrossAdapter)
+            {
+                // Direct3D12 only allows 2D textures as committed cross-adapter resources:
+                // a buffer must be placed in an explicit shared heap.
+                const D3D12_RESOURCE_ALLOCATION_INFO AllocInfo = pd3d12Device->GetResourceAllocationInfo(0, 1, &d3d12BuffDesc);
+
+                D3D12_HEAP_DESC d3d12HeapDesc{};
+                d3d12HeapDesc.SizeInBytes = AllocInfo.SizeInBytes;
+                d3d12HeapDesc.Properties  = HeapProps;
+                d3d12HeapDesc.Alignment   = AllocInfo.Alignment;
+                d3d12HeapDesc.Flags       = D3D12_HEAP_FLAG_SHARED | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER;
+
+                hr = pd3d12Device->CreateHeap(&d3d12HeapDesc, __uuidof(m_pd3d12SharedHeap),
+                                              reinterpret_cast<void**>(static_cast<ID3D12Heap**>(&m_pd3d12SharedHeap)));
+                if (FAILED(hr))
+                    LOG_ERROR_AND_THROW("Failed to create the shared cross-adapter heap of buffer '", m_Desc.Name, "'");
+
+                hr = pd3d12Device->CreatePlacedResource(m_pd3d12SharedHeap, 0, &d3d12BuffDesc, d3d12State,
+                                                        nullptr, // pOptimizedClearValue
+                                                        __uuidof(m_pd3d12Resource),
+                                                        reinterpret_cast<void**>(static_cast<ID3D12Resource**>(&m_pd3d12Resource)));
+            }
+            else
+            {
+                hr = pd3d12Device->CreateCommittedResource(
+                    &HeapProps, d3d12HeapFlags, &d3d12BuffDesc, d3d12State,
+                    nullptr, // pOptimizedClearValue
+                    __uuidof(m_pd3d12Resource),
+                    reinterpret_cast<void**>(static_cast<ID3D12Resource**>(&m_pd3d12Resource)));
+            }
             if (FAILED(hr))
                 LOG_ERROR_AND_THROW("Failed to create D3D12 buffer");
 
@@ -180,8 +239,9 @@ BufferD3D12Impl::BufferD3D12Impl(IReferenceCounters*        pRefCounters,
                 UploadHeapProps.Type                 = D3D12_HEAP_TYPE_UPLOAD;
                 UploadHeapProps.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
                 UploadHeapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-                UploadHeapProps.CreationNodeMask     = 1;
-                UploadHeapProps.VisibleNodeMask      = 1;
+                // Upload buffer is always visible from all nodes; use the creation node as the allocation node.
+                UploadHeapProps.CreationNodeMask     = m_Desc.CreationNodeMask != 0 ? m_Desc.CreationNodeMask : 1;
+                UploadHeapProps.VisibleNodeMask      = m_Desc.VisibleNodeMask  != 0 ? m_Desc.VisibleNodeMask  : UploadHeapProps.CreationNodeMask;
 
                 d3d12BuffDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 

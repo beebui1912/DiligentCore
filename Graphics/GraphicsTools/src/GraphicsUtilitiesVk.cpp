@@ -58,4 +58,10 @@ IDXCompiler* GetDeviceDXCompilerVk(IRenderDevice* pDevice)
     }
 }
 
+bool CreateCrossDeviceFenceVk(IRenderDevice* pDevice, IRenderDevice* pOtherDevice, const FenceDesc& Desc, IFence** ppFence, IFence** ppOtherFence)
+{
+    RefCntAutoPtr<IRenderDeviceVk> pDeviceVk{pDevice, IID_RenderDeviceVk};
+    return pDeviceVk && pDeviceVk->CreateSharedFence(pOtherDevice, Desc, ppFence, ppOtherFence);
+}
+
 } // namespace Diligent

@@ -1204,6 +1204,12 @@ TEST_F(SparseResourceTest, SparseResidentAliasedBuffer)
         if (pBuffer->GetDesc().Usage != USAGE_SPARSE)
         {
             FillBuffer(pContext, pBuffer, BlockSize * 0, BlockSize, Col1);
+
+            // Block 2 was written above: without a barrier the two dispatches race and
+            // the block ends up with a mix of both colors on GPUs that overlap them.
+            StateTransitionDesc UAVBarrier{pBuffer, RESOURCE_STATE_UNORDERED_ACCESS, RESOURCE_STATE_UNORDERED_ACCESS};
+            pContext->TransitionResourceState(UAVBarrier);
+
             FillBuffer(pContext, pBuffer, BlockSize * 2, BlockSize, Col1);
             FillBuffer(pContext, pBuffer, BlockSize * 4, BlockSize, 0);
             FillBuffer(pContext, pBuffer, BlockSize * 6, BlockSize, 0);

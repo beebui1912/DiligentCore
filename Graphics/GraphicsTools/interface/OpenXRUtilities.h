@@ -111,7 +111,10 @@ void DILIGENT_GLOBAL_FUNCTION(AllocateOpenXRSwapchainImageData)(RENDER_DEVICE_TY
 ///                             ImageIndex, Desc, &pImage);
 ///
 /// `TexDesc` should be filled with the texture description that corresponds to the swapchain.
-/// On Direct3D, the texture parameters will be derived from the swapchain resource.
+/// On Direct3D, the texture parameters (size, format, bind flags) will be derived from the swapchain
+/// resource; the format may be typeless, so render through views in the swapchain format.
+/// On Direct3D12, `TexDesc.Name` and `TexDesc.ImmediateContextMask` are used, so set the mask when
+/// the images are rendered by an immediate context other than context 0.
 /// On Vulkan, the texture description should be filled manually since Vulkan does not
 /// provide a way to query texture parameters from the image.
 ///

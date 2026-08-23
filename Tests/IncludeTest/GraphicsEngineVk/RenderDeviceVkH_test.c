@@ -44,4 +44,7 @@ void TestRenderDeviceVkCInterface(IRenderDeviceVk* pDevice)
     IRenderDeviceVk_CreateBLASFromVulkanResource(pDevice, (VkAccelerationStructureKHR)NULL, (BottomLevelASDesc*)NULL, RESOURCE_STATE_BUILD_AS_READ, (IBottomLevelAS**)NULL);
     IRenderDeviceVk_CreateTLASFromVulkanResource(pDevice, (VkAccelerationStructureKHR)NULL, (TopLevelASDesc*)NULL, RESOURCE_STATE_BUILD_AS_READ, (ITopLevelAS**)NULL);
     IRenderDeviceVk_CreateFenceFromVulkanResource(pDevice, (VkSemaphore)NULL, (const FenceDesc*)NULL, (IFence**)NULL);
+
+    Bool Shared = IRenderDeviceVk_CreateSharedFence(pDevice, (IRenderDevice*)NULL, (const FenceDesc*)NULL, (IFence**)NULL, (IFence**)NULL);
+    (void)Shared;
 }

@@ -603,10 +603,30 @@ struct BufferOffsets
     Uint32 VBOffset;
     Uint32 IBOffset;
 };
-BufferOffsets GetBufferOffsets(IRenderDevice* pDevice, Uint32 TestId, Uint32 VertexSize)
+// StructuredVertexView: a structured buffer view (element stride = VertexSize) is created at the vertex data offset.
+// The offset must then also be a multiple of BufferProperties::StructuredBufferOffsetAlignment and of the element
+// stride (e.g. 64 and 48 bytes on Intel GPUs), which is generally not a power of two.
+BufferOffsets GetBufferOffsets(IRenderDevice* pDevice, Uint32 TestId, Uint32 VertexSize, bool StructuredVertexView = false)
 {
-    const auto& RTProps = pDevice->GetAdapterInfo().RayTracing;
-    return BufferOffsets{AlignUp((TestId / 3) * VertexSize, RTProps.VertexBufferAlignment),
+    const auto& AdapterInfo = pDevice->GetAdapterInfo();
+    const auto& RTProps     = AdapterInfo.RayTracing;
+
+    Uint32 VBOffset = (TestId / 3) * VertexSize;
+    if (StructuredVertexView)
+    {
+        const Uint32 PowerOfTwoAlign = std::max(RTProps.VertexBufferAlignment, AdapterInfo.Buffer.StructuredBufferOffsetAlignment);
+        // Least common multiple of the power-of-two alignment and the element stride
+        Uint32 Align = PowerOfTwoAlign;
+        while (Align % VertexSize != 0)
+            Align += PowerOfTwoAlign;
+        VBOffset = (VBOffset + Align - 1) / Align * Align;
+    }
+    else
+    {
+        VBOffset = AlignUp(VBOffset, RTProps.VertexBufferAlignment);
+    }
+
+    return BufferOffsets{VBOffset,
                          AlignUp((TestId / 2) * Uint32{sizeof(Uint32)}, RTProps.IndexBufferAlignment)};
 }
 
@@ -1304,7 +1324,8 @@ TEST_P(RT4, MultiGeometry)
     const auto& Weights          = TestingConstants::MultiGeometry::Weights;
     const auto& PrimitiveOffsets = TestingConstants::MultiGeometry::PrimitiveOffsets;
     const auto& Primitives       = TestingConstants::MultiGeometry::Primitives;
-    const auto  BuffOffsets      = GetBufferOffsets(pDevice, TestId, sizeof(Vertices[0]));
+    // A structured buffer view is created at the vertex data offset
+    const auto BuffOffsets = GetBufferOffsets(pDevice, TestId, sizeof(Vertices[0]), /*StructuredVertexView = */ true);
 
     RefCntAutoPtr<IBuffer>     pVertexBuffer;
     RefCntAutoPtr<IBufferView> pVertexBufferView;

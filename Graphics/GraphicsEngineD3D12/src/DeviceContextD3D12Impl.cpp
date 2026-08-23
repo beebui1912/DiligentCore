@@ -80,19 +80,20 @@ DeviceContextD3D12Impl::DeviceContextD3D12Impl(IReferenceCounters*      pRefCoun
     {
         pDeviceD3D12Impl->GetDynamicMemoryManager(),
         GetContextObjectName("Dynamic heap", Desc.IsDeferred, Desc.ContextId),
-        pDeviceD3D12Impl->GetProperties().DynamicHeapPageSize
+        pDeviceD3D12Impl->GetProperties().DynamicHeapPageSize,
+        1u << Desc.NodeIndex // Node mask for linked multi-GPU (defaults to 1 for single-GPU)
     },
     m_DynamicGPUDescriptorAllocator
     {
         {
             GetRawAllocator(),
-            pDeviceD3D12Impl->GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV),
+            pDeviceD3D12Impl->GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, Desc.NodeIndex),
             pDeviceD3D12Impl->GetProperties().DynamicDescriptorAllocationChunkSize[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV],
             GetContextObjectName("CBV_SRV_UAV dynamic descriptor allocator", Desc.IsDeferred, Desc.ContextId)
         },
         {
             GetRawAllocator(),
-            pDeviceD3D12Impl->GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER),
+            pDeviceD3D12Impl->GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, Desc.NodeIndex),
             pDeviceD3D12Impl->GetProperties().DynamicDescriptorAllocationChunkSize[D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER],
             GetContextObjectName("SAMPLER     dynamic descriptor allocator", Desc.IsDeferred, Desc.ContextId)
         }
@@ -119,7 +120,8 @@ DeviceContextD3D12Impl::DeviceContextD3D12Impl(IReferenceCounters*      pRefCoun
     D3D12_COMMAND_SIGNATURE_DESC CmdSignatureDesc = {};
     D3D12_INDIRECT_ARGUMENT_DESC IndirectArg      = {};
 
-    CmdSignatureDesc.NodeMask         = 0;
+    // 0 unless the device uses linked nodes; then every node, since deferred command lists can run on any node
+    CmdSignatureDesc.NodeMask         = pDeviceD3D12Impl->GetSharedNodeMask();
     CmdSignatureDesc.NumArgumentDescs = 1;
     CmdSignatureDesc.pArgumentDescs   = &IndirectArg;
 
@@ -220,7 +222,7 @@ ID3D12CommandSignature* DeviceContextD3D12Impl::GetDrawIndirectSignature(Uint32 
         IndirectArg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
 
         D3D12_COMMAND_SIGNATURE_DESC CmdSignatureDesc{};
-        CmdSignatureDesc.NodeMask         = 0;
+        CmdSignatureDesc.NodeMask         = m_pDevice->GetSharedNodeMask(); // 0 unless the device uses linked nodes
         CmdSignatureDesc.NumArgumentDescs = 1;
         CmdSignatureDesc.pArgumentDescs   = &IndirectArg;
         CmdSignatureDesc.ByteStride       = Stride;
@@ -242,7 +244,7 @@ ID3D12CommandSignature* DeviceContextD3D12Impl::GetDrawIndexedIndirectSignature(
         IndirectArg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
 
         D3D12_COMMAND_SIGNATURE_DESC CmdSignatureDesc{};
-        CmdSignatureDesc.NodeMask         = 0;
+        CmdSignatureDesc.NodeMask         = m_pDevice->GetSharedNodeMask(); // 0 unless the device uses linked nodes
         CmdSignatureDesc.NumArgumentDescs = 1;
         CmdSignatureDesc.pArgumentDescs   = &IndirectArg;
         CmdSignatureDesc.ByteStride       = Stride;

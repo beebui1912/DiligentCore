@@ -61,4 +61,10 @@ IDXCompiler* GetDeviceDXCompilerD3D12(IRenderDevice* pDevice)
     }
 }
 
+bool CreateCrossDeviceFenceD3D12(IRenderDevice* pDevice, IRenderDevice* pOtherDevice, const FenceDesc& Desc, IFence** ppFence, IFence** ppOtherFence)
+{
+    RefCntAutoPtr<IRenderDeviceD3D12> pDeviceD3D12{pDevice, IID_RenderDeviceD3D12};
+    return pDeviceD3D12 && pDeviceD3D12->CreateSharedFence(pOtherDevice, Desc, ppFence, ppOtherFence);
+}
+
 } // namespace Diligent

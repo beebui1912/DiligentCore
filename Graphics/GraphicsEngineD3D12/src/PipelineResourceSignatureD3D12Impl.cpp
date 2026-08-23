@@ -622,6 +622,12 @@ void PipelineResourceSignatureD3D12Impl::CommitRootTables(const CommitCacheResou
     CommandContext&                 CmdCtx        = CommitAttribs.CmdCtx;
     ID3D12Device* const             pd3d12Device  = CommitAttribs.pd3d12Device;
 
+    // Linked multi-GPU: the executing context targets a specific GPU node. Static/mutable descriptors
+    // were mirrored onto every node's shader-visible heap (see RenderDeviceD3D12Impl::AllocateGPUDescriptors
+    // and ShaderResourceCacheD3D12::CopyResource), so we bind the heap and GPU handles for this node.
+    // For single-GPU, NodeIndex is 0 and every node accessor resolves to node 0, matching legacy behavior.
+    const Uint32 NodeIndex = CommitAttribs.pDeviceCtx != nullptr ? CommitAttribs.pDeviceCtx->GetDesc().NodeIndex : 0;
+
     // Having an array of actual DescriptorHeapAllocation objects introduces unnecessary overhead when
     // there are no dynamic variables as constructors and destructors are always called. To avoid this
     // overhead we will construct DescriptorHeapAllocation in-place only when they are really needed.
@@ -661,8 +667,8 @@ void PipelineResourceSignatureD3D12Impl::CommitRootTables(const CommitCacheResou
     DescriptorHeapAllocation* const pSamplerDynamicAllocation   = pDynamicDescriptorAllocations[D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER];
 
     CommandContext::ShaderDescriptorHeaps Heaps{
-        ResourceCache.GetDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, ROOT_PARAMETER_GROUP_STATIC_MUTABLE),
-        ResourceCache.GetDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, ROOT_PARAMETER_GROUP_STATIC_MUTABLE),
+        ResourceCache.GetDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, ROOT_PARAMETER_GROUP_STATIC_MUTABLE, NodeIndex),
+        ResourceCache.GetDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, ROOT_PARAMETER_GROUP_STATIC_MUTABLE, NodeIndex),
     };
     if (Heaps.pSrvCbvUavHeap == nullptr && pSrvCbvUavDynamicAllocation != nullptr)
         Heaps.pSrvCbvUavHeap = pSrvCbvUavDynamicAllocation->GetDescriptorHeap();
@@ -702,7 +708,7 @@ void PipelineResourceSignatureD3D12Impl::CommitRootTables(const CommitCacheResou
         else
         {
             RootTableGPUDescriptorHandle = ResourceCache.GetDescriptorTableHandle<D3D12_GPU_DESCRIPTOR_HANDLE>(
-                d3d12HeapType, ROOT_PARAMETER_GROUP_STATIC_MUTABLE, RootTable.RootIndex);
+                d3d12HeapType, ROOT_PARAMETER_GROUP_STATIC_MUTABLE, RootTable.RootIndex, 0 /*OffsetFromTableStart*/, NodeIndex);
             VERIFY(RootTableGPUDescriptorHandle.ptr != 0, "Unexpected null GPU descriptor handle");
         }
 

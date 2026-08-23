@@ -295,6 +295,38 @@ void DILIGENT_GLOBAL_FUNCTION(CreateGeometryPrimitiveBuffers)(IRenderDevice*    
 ///             or if the compiler is not loaded, returns null.
 struct IDXCompiler* DILIGENT_GLOBAL_FUNCTION(GetDeviceDXCompiler)(IRenderDevice* pDevice);
 
+/// Creates a fence of each of two devices, so that the two fences share one synchronization object
+/// and the GPUs synchronize without the CPU.
+
+/// \param [in]  pDevice      - The first device.
+/// \param [in]  pOtherDevice - The second device. It must have the same device type as pDevice.
+/// \param [in]  Desc         - Fence description. The type must be Diligent::FENCE_TYPE_GENERAL.
+/// \param [out] ppFence      - Address of the memory location where the pointer to the fence of pDevice
+///                             will be stored. The function calls AddRef().
+/// \param [out] ppOtherFence - Address of the memory location where the pointer to the fence of pOtherDevice
+///                             will be stored. The function calls AddRef().
+/// \return True if the fences were created. False if the devices can not share a fence: the outputs are then
+///         null, and the CPU must synchronize the devices (it waits with IFence::Wait() for a fence that one
+///         device signals before it submits the work of the other device).
+///
+/// \remarks Both fences have the same value: a queue of one device waits on the GPU
+///          (IDeviceContext::DeviceWaitForFence()) for a value that a queue of the other device signals
+///          (IDeviceContext::EnqueueSignal()), and the CPU can wait for or signal either fence.
+///
+///          Support, which does not depend on the operating system beyond the handle type that is used:
+///          * Direct3D12: any two devices, on one adapter or on different adapters (cross-adapter fences),
+///            see IRenderDeviceD3D12::CreateSharedFence().
+///          * Vulkan: devices on the same physical device and driver, through an NT handle on Windows and a POSIX
+///            file descriptor on the other platforms, see IRenderDeviceVk::CreateSharedFence(). The Vulkan
+///            specification does not allow sharing semaphores between different GPUs.
+///          * Other device types, and devices of different types: not supported (the function returns false).
+///          Both devices must have the NativeFence feature enabled.
+Bool DILIGENT_GLOBAL_FUNCTION(CreateCrossDeviceFence)(IRenderDevice*      pDevice,
+                                                      IRenderDevice*      pOtherDevice,
+                                                      const FenceDesc REF Desc,
+                                                      IFence**            ppFence,
+                                                      IFence**            ppOtherFence);
+
 #include "../../../Primitives/interface/UndefRefMacro.h"
 
 DILIGENT_END_NAMESPACE // namespace Diligent

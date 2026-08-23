@@ -57,6 +57,11 @@ public:
                 RenderDeviceVkImpl* pRenderDeviceVkImpl,
                 const FenceDesc&    Desc,
                 VkSemaphore         vkTimelineSemaphore);
+    // Takes the ownership of the timeline semaphore (e.g. a semaphore shared with another device)
+    FenceVkImpl(IReferenceCounters*                 pRefCounters,
+                RenderDeviceVkImpl*                 pRenderDeviceVkImpl,
+                const FenceDesc&                    Desc,
+                VulkanUtilities::SemaphoreWrapper&& TimelineSemaphore);
     ~FenceVkImpl();
 
     IMPLEMENT_QUERY_INTERFACE_IN_PLACE(IID_FenceVk, TFenceBase)

@@ -50,6 +50,7 @@ TEXTURE_FORMAT GetTextureFormatFromNativeD3D11(int64_t NativeFormat);
 int64_t        GetNativeTextureFormatD3D12(TEXTURE_FORMAT TexFormat);
 TEXTURE_FORMAT GetTextureFormatFromNativeD3D12(int64_t NativeFormat);
 IDXCompiler*   GetDeviceDXCompilerD3D12(IRenderDevice* pDevice);
+bool           CreateCrossDeviceFenceD3D12(IRenderDevice* pDevice, IRenderDevice* pOtherDevice, const FenceDesc& Desc, IFence** ppFence, IFence** ppOtherFence);
 #endif
 
 #if GL_SUPPORTED || GLES_SUPPORTED
@@ -61,6 +62,7 @@ TEXTURE_FORMAT GetTextureFormatFromNativeGL(int64_t NativeFormat);
 int64_t        GetNativeTextureFormatVk(TEXTURE_FORMAT TexFormat);
 TEXTURE_FORMAT GetTextureFormatFromNativeVk(int64_t NativeFormat);
 IDXCompiler*   GetDeviceDXCompilerVk(IRenderDevice* pDevice);
+bool           CreateCrossDeviceFenceVk(IRenderDevice* pDevice, IRenderDevice* pOtherDevice, const FenceDesc& Desc, IFence** ppFence, IFence** ppOtherFence);
 #endif
 
 #if METAL_SUPPORTED
@@ -789,6 +791,46 @@ IDXCompiler* GetDeviceDXCompiler(IRenderDevice* pDevice)
     }
 }
 
+Bool CreateCrossDeviceFence(IRenderDevice*   pDevice,
+                            IRenderDevice*   pOtherDevice,
+                            const FenceDesc& Desc,
+                            IFence**         ppFence,
+                            IFence**         ppOtherFence)
+{
+    if (ppFence == nullptr || ppOtherFence == nullptr)
+    {
+        UNEXPECTED("ppFence and ppOtherFence must not be null");
+        return False;
+    }
+    *ppFence      = nullptr;
+    *ppOtherFence = nullptr;
+
+    if (pDevice == nullptr || pOtherDevice == nullptr)
+        return False;
+
+    // Each backend shares fences through its own native objects, so the devices must have the same type
+    const RENDER_DEVICE_TYPE DeviceType = pDevice->GetDeviceInfo().Type;
+    if (pOtherDevice->GetDeviceInfo().Type != DeviceType)
+        return False;
+
+    switch (DeviceType)
+    {
+#if D3D12_SUPPORTED
+        case RENDER_DEVICE_TYPE_D3D12:
+            return CreateCrossDeviceFenceD3D12(pDevice, pOtherDevice, Desc, ppFence, ppOtherFence);
+#endif
+
+#if VULKAN_SUPPORTED
+        case RENDER_DEVICE_TYPE_VULKAN:
+            return CreateCrossDeviceFenceVk(pDevice, pOtherDevice, Desc, ppFence, ppOtherFence);
+#endif
+
+        default:
+            // The backend can not share fences between devices: the CPU synchronizes them
+            return False;
+    }
+}
+
 } // namespace Diligent
 
 
@@ -889,5 +931,14 @@ extern "C"
     Diligent::IDXCompiler* Diligent_GetDeviceDXCompiler(Diligent::IRenderDevice* pDevice)
     {
         return Diligent::GetDeviceDXCompiler(pDevice);
+    }
+
+    Diligent::Bool Diligent_CreateCrossDeviceFence(Diligent::IRenderDevice*   pDevice,
+                                                   Diligent::IRenderDevice*   pOtherDevice,
+                                                   const Diligent::FenceDesc& Desc,
+                                                   Diligent::IFence**         ppFence,
+                                                   Diligent::IFence**         ppOtherFence)
+    {
+        return Diligent::CreateCrossDeviceFence(pDevice, pOtherDevice, Desc, ppFence, ppOtherFence);
     }
 }

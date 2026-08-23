@@ -54,6 +54,19 @@ FenceD3D12Impl::FenceD3D12Impl(IReferenceCounters*    pRefCounters,
         m_pd3d12Fence->SetName(WidenString(m_Desc.Name).c_str());
 }
 
+FenceD3D12Impl::FenceD3D12Impl(IReferenceCounters*    pRefCounters,
+                               RenderDeviceD3D12Impl* pDevice,
+                               const FenceDesc&       Desc,
+                               ID3D12Fence*           pd3d12Fence) :
+    TFenceBase{pRefCounters, pDevice, Desc},
+    m_pd3d12Fence{pd3d12Fence}
+{
+    if (!m_pd3d12Fence)
+        LOG_ERROR_AND_THROW("D3D12 fence must not be null");
+    if (m_Desc.Name != nullptr)
+        m_pd3d12Fence->SetName(WidenString(m_Desc.Name).c_str());
+}
+
 FenceD3D12Impl::~FenceD3D12Impl()
 {
     // D3D12 object can only be destroyed when it is no longer used by the GPU

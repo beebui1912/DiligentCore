@@ -64,6 +64,7 @@ Below are some of the methods that provide access to internal Vulkan objects:
 | `IRenderDeviceVk::CreateBLASFromVulkanResource`    | creates a Diligent Engine bottom-level acceleration structure from the native Vulkan handle |
 | `IRenderDeviceVk::CreateTLASFromVulkanResource`    | creates a Diligent Engine top-level acceleration structure from the native Vulkan handle    |
 | `IRenderDeviceVk::CreateFenceFromVulkanResource`   | creates a Diligent Engine fence from the native Vulkan handle                               |
+| `IRenderDeviceVk::CreateSharedFence`               | creates fences of this device and of another Vulkan device on the same physical device that share one timeline semaphore (NT handle on Windows, file descriptor elsewhere), so that the devices wait for each other on the GPU |
 
 
 

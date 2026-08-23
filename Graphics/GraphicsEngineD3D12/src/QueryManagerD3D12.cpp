@@ -133,7 +133,8 @@ QueryManagerD3D12::QueryHeapInfo::~QueryHeapInfo()
 QueryManagerD3D12::QueryManagerD3D12(RenderDeviceD3D12Impl* pDeviceD3D12Impl,
                                      const Uint32           QueryHeapSizes[],
                                      SoftwareQueueIndex     CommandQueueId,
-                                     HardwareQueueIndex     HwQueueInd) :
+                                     HardwareQueueIndex     HwQueueInd,
+                                     UINT                   NodeMask) :
     m_CommandQueueId{CommandQueueId}
 {
     const RenderDeviceInfo& DevInfo      = pDeviceD3D12Impl->GetDeviceInfo();
@@ -166,6 +167,8 @@ QueryManagerD3D12::QueryManagerD3D12(RenderDeviceD3D12Impl* pDeviceD3D12Impl,
         D3D12_QUERY_HEAP_DESC d3d12HeapDesc{};
         d3d12HeapDesc.Type  = QueryTypeToD3D12QueryHeapType(QueryType, HwQueueInd);
         d3d12HeapDesc.Count = QueryHeapSizes[QueryType];
+        // A query heap must be on the node of the command list that uses it (0 = single node)
+        d3d12HeapDesc.NodeMask = NodeMask;
         if (QueryType == QUERY_TYPE_DURATION)
             d3d12HeapDesc.Count *= 2;
 
@@ -195,8 +198,9 @@ QueryManagerD3D12::QueryManagerD3D12(RenderDeviceD3D12Impl* pDeviceD3D12Impl,
         HeapProps.Type                 = D3D12_HEAP_TYPE_READBACK;
         HeapProps.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
         HeapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-        HeapProps.CreationNodeMask     = 1;
-        HeapProps.VisibleNodeMask      = 1;
+        // On the queue's node, like the query heaps it is resolved from (1 = node 0 on a single-node adapter)
+        HeapProps.CreationNodeMask     = NodeMask != 0 ? NodeMask : 1;
+        HeapProps.VisibleNodeMask      = HeapProps.CreationNodeMask;
 
         // The destination buffer of a query resolve operation must be in the D3D12_RESOURCE_USAGE_COPY_DEST state.
         // ResolveQueryData works with all heap types (default, upload, readback).

@@ -169,6 +169,82 @@ DILIGENT_BEGIN_INTERFACE(IRenderDeviceVk, IRenderDevice)
 
     /// Returns DX compiler interface, or null if the compiler is not loaded.
     VIRTUAL struct IDXCompiler* METHOD(GetDXCompiler)(THIS) CONST PURE;
+
+    /// Returns the size and the alignment of a host allocation that can store the data
+    /// of a staging texture created by CreateTextureFromHostMemory().
+
+    /// \param [in]  TexDesc   - Description of a staging texture: USAGE_STAGING and either
+    ///                          CPU_ACCESS_READ or CPU_ACCESS_WRITE.
+    /// \param [out] Size      - The minimum size of the allocation, in bytes.
+    /// \param [out] Alignment - The alignment that the address of the allocation must have, in bytes.
+    /// \return True if the device can import host memory (VK_EXT_external_memory_host), and false otherwise.
+    ///
+    /// \remarks To share one allocation between several devices, use the largest size and
+    ///          the largest alignment that the devices return.
+    VIRTUAL Bool METHOD(GetHostMemoryTextureRequirements)(THIS_
+                                                          const TextureDesc REF TexDesc,
+                                                          Uint64 REF            Size,
+                                                          Uint64 REF            Alignment) CONST PURE;
+
+    /// Creates a staging texture whose data is stored in a host allocation that the application provides
+    /// (VK_EXT_external_memory_host).
+
+    /// \param [in]  TexDesc          - Texture description: USAGE_STAGING and either CPU_ACCESS_READ or CPU_ACCESS_WRITE.
+    /// \param [in]  pHostMemory      - Address of the host allocation. Its size and alignment must be at least
+    ///                                 the values that GetHostMemoryTextureRequirements() returns.
+    /// \param [in]  pHostMemoryOwner - Optional object that owns the allocation. The texture keeps a reference
+    ///                                 to it and releases it after the device has freed the imported memory.
+    /// \param [out] ppTexture        - Address of the memory location where the pointer to the
+    ///                                 texture interface will be stored.
+    ///                                 The function calls AddRef(), so that the new object will contain
+    ///                                 one reference.
+    ///
+    /// \remarks Two devices that import the same allocation exchange data without a CPU copy, which is how
+    ///          unlinked GPUs can share data in Vulkan when they are not in one device group:
+    ///          * Device A copies a texture into its CPU_ACCESS_READ texture: the GPU writes the allocation.
+    ///          * Device B waits for a fence that device A signals after the copy: the CPU waits (IFence::Wait()),
+    ///            or, if the devices share the fence (CreateSharedFence()), device B's queue waits on the GPU
+    ///            (IDeviceContext::DeviceWaitForFence()). Nobody touches the data on the CPU.
+    ///          * Device B copies its CPU_ACCESS_WRITE texture into a texture: the GPU reads the allocation.
+    ///          The data travels through system memory. Device B must not read before the fence wait, and device A
+    ///          must not write again before device B's copy has completed.
+    ///
+    ///          If pHostMemoryOwner is null, the allocation must stay valid until the texture has been released
+    ///          and the device has released its stale resources (IRenderDevice::IdleGPU()).
+    VIRTUAL void METHOD(CreateTextureFromHostMemory)(THIS_
+                                                     const TextureDesc REF TexDesc,
+                                                     void*                 pHostMemory,
+                                                     IObject*              pHostMemoryOwner,
+                                                     ITexture**            ppTexture) PURE;
+
+    /// Creates a fence of this device and a fence of another Vulkan device that share one timeline semaphore,
+    /// so that the devices synchronize on the GPU.
+
+    /// \param [in]  pOtherDevice - The other Vulkan device.
+    /// \param [in]  Desc         - Fence description. The type must be Diligent::FENCE_TYPE_GENERAL.
+    /// \param [out] ppFence      - Address of the memory location where the pointer to the fence of this
+    ///                             device will be stored. The function calls AddRef().
+    /// \param [out] ppOtherFence - Address of the memory location where the pointer to the fence of
+    ///                             pOtherDevice will be stored. The function calls AddRef().
+    /// \return True if the fences were created, and false if the devices can not share a semaphore.
+    ///         The outputs are null in that case.
+    ///
+    /// \remarks Both fences have the same value. Either fence can be signaled (IDeviceContext::EnqueueSignal(),
+    ///          IFence::Signal()) and waited for (IDeviceContext::DeviceWaitForFence(), IFence::Wait()), so a
+    ///          queue of one device can wait on the GPU for work that a queue of the other device signals.
+    ///
+    ///          The semaphore is shared through an NT handle on Windows (VK_KHR_external_semaphore_win32) and
+    ///          a POSIX file descriptor on the other platforms (VK_KHR_external_semaphore_fd). Requirements:
+    ///          * Both devices use the same physical device and driver: the Vulkan specification allows sharing
+    ///            these handle types only between devices with the same VkPhysicalDeviceIDProperties::deviceUUID
+    ///            and driverUUID. Devices on two different GPUs can not share a semaphore.
+    ///          * Both devices have the NativeFence feature enabled (timeline semaphores) and can export and
+    ///            import timeline semaphores through the handle type.
+    VIRTUAL Bool METHOD(CreateSharedFence)(THIS_
+                                           IRenderDevice*      pOtherDevice,
+                                           const FenceDesc REF Desc,
+                                           IFence**            ppFence,
+                                           IFence**            ppOtherFence) PURE;
 };
 DILIGENT_END_INTERFACE
 
@@ -188,6 +264,9 @@ DILIGENT_END_INTERFACE
 #    define IRenderDeviceVk_CreateFenceFromVulkanResource(This, ...)  CALL_IFACE_METHOD(RenderDeviceVk, CreateFenceFromVulkanResource,  This, __VA_ARGS__)
 #    define IRenderDeviceVk_GetDeviceFeaturesVk(This, ...)            CALL_IFACE_METHOD(RenderDeviceVk, GetDeviceFeaturesVk,            This, __VA_ARGS__)
 #    define IRenderDeviceVk_GetDXCompiler(This)                       CALL_IFACE_METHOD(RenderDeviceVk, GetDXCompiler,                  This)
+#    define IRenderDeviceVk_GetHostMemoryTextureRequirements(This, ...) CALL_IFACE_METHOD(RenderDeviceVk, GetHostMemoryTextureRequirements, This, __VA_ARGS__)
+#    define IRenderDeviceVk_CreateTextureFromHostMemory(This, ...)    CALL_IFACE_METHOD(RenderDeviceVk, CreateTextureFromHostMemory,    This, __VA_ARGS__)
+#    define IRenderDeviceVk_CreateSharedFence(This, ...)              CALL_IFACE_METHOD(RenderDeviceVk, CreateSharedFence,              This, __VA_ARGS__)
 
 // clang-format on
 

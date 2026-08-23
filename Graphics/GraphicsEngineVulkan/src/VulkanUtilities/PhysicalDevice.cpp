@@ -359,6 +359,28 @@ PhysicalDevice::PhysicalDevice(const CreateInfo& CI) :
             m_ExtFeatures.ComputeShaderDerivatives.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
         }
 
+        // Importing host allocations lets another device share the memory without a CPU copy.
+        // The extension depends on VK_KHR_external_memory, which is core in Vulkan 1.1.
+        if (m_vkVersion >= VK_API_VERSION_1_1 && IsExtensionSupported(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME))
+        {
+            m_ExtFeatures.ExternalMemoryHost = true;
+
+            *NextProp = &m_ExtProperties.ExternalMemoryHost;
+            NextProp  = &m_ExtProperties.ExternalMemoryHost.pNext;
+
+            m_ExtProperties.ExternalMemoryHost.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT;
+        }
+
+        // Device and driver identity: devices may share external semaphores only if their deviceUUID and
+        // driverUUID match. Core in Vulkan 1.1.
+        if (m_vkVersion >= VK_API_VERSION_1_1)
+        {
+            *NextProp = &m_ExtProperties.ID;
+            NextProp  = &m_ExtProperties.ID.pNext;
+
+            m_ExtProperties.ID.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+        }
+
         const bool HostImageCopySupported = IsExtensionSupported(VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME);
         if (HostImageCopySupported)
         {
@@ -393,6 +415,33 @@ PhysicalDevice::PhysicalDevice(const CreateInfo& CI) :
             }
             Props2.pNext = &m_ExtProperties.HostImageCopy;
             vkGetPhysicalDeviceProperties2KHR(m_vkDevice, &Props2);
+        }
+
+        // Unlinked multi-GPU: timeline semaphores that another device imports (IRenderDeviceVk::CreateSharedFence)
+        // through the platform's handle type. VK_KHR_external_semaphore and the capability query are core in Vulkan 1.1.
+        if (m_vkVersion >= VK_API_VERSION_1_1 &&
+            m_ExtFeatures.TimelineSemaphore.timelineSemaphore != VK_FALSE &&
+            IsExtensionSupported(ExternalSemaphoreExtensionName) &&
+            vkGetPhysicalDeviceExternalSemaphoreProperties != nullptr)
+        {
+            VkSemaphoreTypeCreateInfo TimelineInfo{};
+            TimelineInfo.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+            TimelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+
+            VkPhysicalDeviceExternalSemaphoreInfo SemaphoreInfo{};
+            SemaphoreInfo.sType      = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO;
+            SemaphoreInfo.pNext      = &TimelineInfo;
+            SemaphoreInfo.handleType = ExternalSemaphoreHandleType;
+
+            VkExternalSemaphoreProperties SemaphoreProps{};
+            SemaphoreProps.sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES;
+            vkGetPhysicalDeviceExternalSemaphoreProperties(m_vkDevice, &SemaphoreInfo, &SemaphoreProps);
+
+            constexpr VkExternalSemaphoreFeatureFlags RequiredFeatures =
+                VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
+            m_ExtFeatures.ExternalSemaphore =
+                (SemaphoreProps.externalSemaphoreFeatures & RequiredFeatures) == RequiredFeatures &&
+                (SemaphoreProps.compatibleHandleTypes & ExternalSemaphoreHandleType) != 0;
         }
 
         // Check texture formats

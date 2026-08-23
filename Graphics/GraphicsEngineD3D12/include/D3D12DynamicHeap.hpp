@@ -76,7 +76,7 @@ struct D3D12DynamicAllocation
 class D3D12DynamicPage
 {
 public:
-    D3D12DynamicPage(ID3D12Device* pd3d12Device, Uint64 Size);
+    D3D12DynamicPage(ID3D12Device* pd3d12Device, Uint64 Size, Uint32 CreationNodeMask = 1, Uint32 VisibleNodeMask = 1);
 
     // clang-format off
     D3D12DynamicPage            (const D3D12DynamicPage&)  = delete;
@@ -112,8 +112,12 @@ public:
 
     bool IsValid() const { return m_pd3d12Buffer != nullptr; }
 
+    // Node the page was created on (linked multi-GPU); 1 on single-node adapters
+    Uint32 GetNodeMask() const { return m_NodeMask; }
+
 private:
     CComPtr<ID3D12Resource>   m_pd3d12Buffer;
+    Uint32                    m_NodeMask          = 1;
     void*                     m_CPUVirtualAddress = nullptr; // The CPU-writeable address
     D3D12_GPU_VIRTUAL_ADDRESS m_GPUVirtualAddress = 0;       // The GPU-visible address
 };
@@ -139,7 +143,7 @@ public:
 
     void Destroy();
 
-    D3D12DynamicPage AllocatePage(Uint64 SizeInBytes);
+    D3D12DynamicPage AllocatePage(Uint64 SizeInBytes, Uint32 NodeMask = 1);
 
 #ifdef DILIGENT_DEVELOPMENT
     Int32 GetAllocatedPageCounter() const
@@ -164,10 +168,11 @@ private:
 class D3D12DynamicHeap
 {
 public:
-    D3D12DynamicHeap(D3D12DynamicMemoryManager& DynamicMemMgr, std::string HeapName, Uint64 PageSize) :
+    D3D12DynamicHeap(D3D12DynamicMemoryManager& DynamicMemMgr, std::string HeapName, Uint64 PageSize, Uint32 NodeMask = 1) :
         m_GlobalDynamicMemMgr{DynamicMemMgr},
         m_HeapName{std::move(HeapName)},
-        m_PageSize{PageSize}
+        m_PageSize{PageSize},
+        m_NodeMask{NodeMask}
     {}
 
     // clang-format off
@@ -193,6 +198,7 @@ private:
     std::vector<D3D12DynamicPage> m_AllocatedPages;
 
     const Uint64 m_PageSize;
+    const Uint32 m_NodeMask;
 
     Uint64 m_CurrOffset    = InvalidOffset;
     Uint64 m_AvailableSize = 0;
