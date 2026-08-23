@@ -25,6 +25,7 @@
  *  of the possibility of such damages.
  */
 
+#include <atomic>
 #include <limits>
 #include "VulkanErrors.hpp"
 #include "VulkanUtilities/LogicalDevice.hpp"
@@ -34,6 +35,15 @@
 namespace VulkanUtilities
 {
 
+namespace
+{
+// volk exposes a single set of global Vulkan function pointers. The per-device optimization
+// (volkLoadDevice) rebinds those globals to one specific VkDevice, so it can only be used when a
+// single device is alive. This counter lets additional devices fall back to the instance-level
+// (trampolined) pointers so that multiple Vulkan devices can coexist (e.g. unlinked multi-GPU).
+std::atomic<int> g_LiveLogicalDeviceCount{0};
+} // namespace
+
 std::shared_ptr<LogicalDevice> LogicalDevice::Create(const CreateInfo& CI)
 {
     return std::shared_ptr<LogicalDevice>{new LogicalDevice{CI}};
@@ -42,6 +52,7 @@ std::shared_ptr<LogicalDevice> LogicalDevice::Create(const CreateInfo& CI)
 LogicalDevice::~LogicalDevice()
 {
     vkDestroyDevice(m_VkDevice, m_VkAllocator);
+    g_LiveLogicalDeviceCount.fetch_sub(1, std::memory_order_relaxed);
 }
 
 LogicalDevice::LogicalDevice(const CreateInfo& CI) :
@@ -50,10 +61,27 @@ LogicalDevice::LogicalDevice(const CreateInfo& CI) :
     m_EnabledFeatures{CI.EnabledFeatures},
     m_EnabledExtFeatures{CI.EnabledExtFeatures}
 {
+    // Track the number of live logical devices. volkLoadInstance() (called when the instance is
+    // created) already loads every device-level entry point as a loader trampoline that dispatches
+    // correctly for ANY device, so all devices remain usable through the global pointers.
+    const bool IsSoleDevice = g_LiveLogicalDeviceCount.fetch_add(1, std::memory_order_relaxed) == 0;
 #if DILIGENT_USE_VOLK
-    // Since we only use one device at this time, load device function entries
+    // Load a dedicated per-device function-pointer table. Every Vulkan device gets its own table of
+    // device-optimized entry points, so multiple devices can be driven simultaneously without one
+    // clobbering another's pointers. The engine routes the per-frame hot paths (command recording
+    // and queue submission) through this table (see GetVkTable()).
+    volkLoadDeviceTable(&m_VkTable, m_VkDevice);
+
+    // volkLoadDevice() additionally rebinds the single set of GLOBAL pointers to this device, which
+    // optimizes the cold-path calls that are not routed through the per-device table. Because that
+    // makes the globals valid for this device only, we apply it exclusively when this is the single
+    // live device. When more than one device is alive, cold-path calls fall back to the trampolined
+    // global pointers loaded by volkLoadInstance(), which dispatch correctly for any device.
     // https://github.com/zeux/volk#optimizing-device-calls
-    volkLoadDevice(m_VkDevice);
+    if (IsSoleDevice)
+        volkLoadDevice(m_VkDevice);
+#else
+    (void)IsSoleDevice;
 #endif
 
     VkPipelineStageFlags GraphicsStages =

@@ -251,11 +251,24 @@ public:
 
     D3D12DynamicMemoryManager& GetDynamicMemoryManager() { return m_DynamicMemoryManager; }
 
-    GPUDescriptorHeap& GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE Type)
+    GPUDescriptorHeap& GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE Type, Uint32 NodeIndex = 0)
     {
         VERIFY_EXPR(Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-        return m_GPUDescriptorHeaps[Type];
+        VERIFY_EXPR(NodeIndex < m_NodeCount);
+        VERIFY_EXPR(m_GPUDescriptorHeaps[NodeIndex][Type] != nullptr);
+        return *m_GPUDescriptorHeaps[NodeIndex][Type];
     }
+
+    Uint32 GetNodeCount() const { return m_NodeCount; }
+
+    // Node mask for device-wide objects that every node may use: pipeline states, root signatures
+    // and command signatures. 0 on a single-node adapter (the D3D12 default, unchanged behavior);
+    // all linked nodes otherwise, since an object created with mask 0 exists on node 0 only.
+    UINT GetSharedNodeMask() const { return m_NodeCount > 1 ? (1u << m_NodeCount) - 1u : 0u; }
+
+    // All nodes, for resources that every node may access, if the linked adapter supports cross-node
+    // sharing (D3D12_FEATURE_D3D12_OPTIONS::CrossNodeSharingTier); 0 otherwise and on single-node adapters
+    UINT GetCrossNodeVisibleMask() const { return m_NodeCount > 1 && m_CrossNodeSharing ? (1u << m_NodeCount) - 1u : 0u; }
 
     const GenerateMipsHelper& GetMipsGenerator() const { return m_MipsGenerator; }
 
@@ -308,8 +321,12 @@ private:
     CComPtr<ID3D12Device> m_pd3d12Device;
 
     CPUDescriptorHeap m_CPUDescriptorHeaps[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES];
-    GPUDescriptorHeap m_GPUDescriptorHeaps[2]; // D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV == 0
-                                               // D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER	 == 1
+    // Per-node shader-visible descriptor heaps for linked multi-GPU.
+    // In single-GPU mode, only m_GPUDescriptorHeaps[0] is used (NodeCount=1).
+    // Index: [NodeIndex][HeapType] where HeapType is CBV_SRV_UAV(0) or SAMPLER(1).
+    std::unique_ptr<GPUDescriptorHeap> m_GPUDescriptorHeaps[DILIGENT_MAX_LINKED_GPU_NODES][2];
+    Uint32 m_NodeCount        = 1;
+    bool   m_CrossNodeSharing = false; // linked adapter supports cross-node sharing (tier above NOT_SUPPORTED)
 
     CommandListManager m_CmdListManagers[3]; // 0 - direct, 1 - compute, 2 - copy
 

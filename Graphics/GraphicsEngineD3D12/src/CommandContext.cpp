@@ -54,11 +54,14 @@
 namespace Diligent
 {
 
-CommandContext::CommandContext(CommandListManager& CmdListManager) :
+CommandContext::CommandContext(CommandListManager& CmdListManager, UINT NodeMask) :
     m_PendingResourceBarriers(STD_ALLOCATOR_RAW_MEM(D3D12_RESOURCE_BARRIER, GetRawAllocator(), "Allocator for vector<D3D12_RESOURCE_BARRIER>"))
 {
+    if (NodeMask == 0)
+        NodeMask = 1;
+    m_NodeMask = NodeMask;
     m_PendingResourceBarriers.reserve(32);
-    CmdListManager.CreateNewCommandList(&m_pCommandList, &m_pCurrentAllocator, m_MaxInterfaceVer);
+    CmdListManager.CreateNewCommandList(&m_pCommandList, &m_pCurrentAllocator, m_MaxInterfaceVer, m_NodeMask);
 }
 
 CommandContext::~CommandContext(void)
@@ -66,15 +69,31 @@ CommandContext::~CommandContext(void)
     DEV_CHECK_ERR(m_pCurrentAllocator == nullptr, "Command allocator must be released prior to destroying the command context");
 }
 
-void CommandContext::Reset(CommandListManager& CmdListManager)
+void CommandContext::Reset(CommandListManager& CmdListManager, UINT NodeMask)
 {
     // We only call Reset() on previously freed contexts. The command list persists, but we need to
     // request a new allocator
     VERIFY_EXPR(m_pCommandList != nullptr);
     VERIFY_EXPR(m_pCommandList->GetType() == CmdListManager.GetCommandListType());
-    if (!m_pCurrentAllocator)
+
+    if (NodeMask == 0)
+        NodeMask = 1;
+
+    if (NodeMask != m_NodeMask)
     {
-        CmdListManager.RequestAllocator(&m_pCurrentAllocator);
+        // A pooled context is being reused on a different GPU node. A D3D12 command list is bound to
+        // the node it was created for, so it cannot simply be reset onto another node - it must be
+        // recreated. The previous allocator was already handed back on Close(), so m_pCurrentAllocator
+        // is null here. This path never runs on single-GPU (NodeMask stays 1).
+        VERIFY_EXPR(m_pCurrentAllocator == nullptr);
+        m_pCurrentAllocator.Release();
+        m_pCommandList.Release();
+        CmdListManager.CreateNewCommandList(&m_pCommandList, &m_pCurrentAllocator, m_MaxInterfaceVer, NodeMask);
+        m_NodeMask = NodeMask;
+    }
+    else if (!m_pCurrentAllocator)
+    {
+        CmdListManager.RequestAllocator(&m_pCurrentAllocator, m_NodeMask);
         // Unlike ID3D12CommandAllocator::Reset, ID3D12GraphicsCommandList::Reset can be called while the
         // command list is still being executed. A typical pattern is to submit a command list and then
         // immediately reset it to reuse the allocated memory for another command list.

@@ -32,6 +32,13 @@
 namespace VulkanUtilities
 {
 
+#if DILIGENT_USE_VOLK
+// Route the barrier command through the command buffer's per-device function table (see
+// CommandBuffer.hpp). Falls back to the global (trampolined) pointer when the table is not assigned.
+// The preprocessor does not expand macros inside string literals, so log messages are unaffected.
+#    define vkCmdPipelineBarrier (m_pVkTable != nullptr ? m_pVkTable->vkCmdPipelineBarrier : ::vkCmdPipelineBarrier)
+#endif
+
 namespace
 {
 
@@ -280,5 +287,9 @@ void CommandBuffer::FlushBarriers()
     m_Barrier.MemoryDstAccess = 0;
     // Do not clear SupportedStagesMask and SupportedAccessMask
 }
+
+#if DILIGENT_USE_VOLK
+#    undef vkCmdPipelineBarrier
+#endif
 
 } // namespace VulkanUtilities

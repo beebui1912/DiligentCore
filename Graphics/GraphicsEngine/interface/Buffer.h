@@ -129,6 +129,12 @@ struct BufferDesc DILIGENT_DERIVE(DeviceObjectAttribs)
     ///             will actually be used. Do not set unnecessary bits as this will result in extra overhead.
     Uint64 ImmediateContextMask     DEFAULT_INITIALIZER(1);
 
+    /// Bitmask identifying the GPU node where physical memory will be allocated (0 = default node 0).
+    Uint32 CreationNodeMask         DEFAULT_INITIALIZER(0);
+
+    /// Bitmask identifying GPU nodes that can access this resource (0 = visible to all linked nodes).
+    Uint32 VisibleNodeMask          DEFAULT_INITIALIZER(0);
+
 
 #if DILIGENT_CPP_INTERFACE
     // We have to explicitly define constructors because otherwise the following initialization fails on Apple's clang:
@@ -143,7 +149,9 @@ struct BufferDesc DILIGENT_DERIVE(DeviceObjectAttribs)
                          CPU_ACCESS_FLAGS _CPUAccessFlags       = BufferDesc{}.CPUAccessFlags,
                          BUFFER_MODE      _Mode                 = BufferDesc{}.Mode,
                          Uint32           _ElementByteStride    = BufferDesc{}.ElementByteStride,
-                         Uint64           _ImmediateContextMask = BufferDesc{}.ImmediateContextMask) noexcept :
+                         Uint64           _ImmediateContextMask = BufferDesc{}.ImmediateContextMask,
+                         Uint32           _CreationNodeMask     = BufferDesc{}.CreationNodeMask,
+                         Uint32           _VisibleNodeMask      = BufferDesc{}.VisibleNodeMask) noexcept :
         DeviceObjectAttribs  {_Name             },
         Size                 {_Size             },
         BindFlags            {_BindFlags        },
@@ -151,7 +159,9 @@ struct BufferDesc DILIGENT_DERIVE(DeviceObjectAttribs)
         CPUAccessFlags       {_CPUAccessFlags   },
         Mode                 {_Mode             },
         ElementByteStride    {_ElementByteStride},
-        ImmediateContextMask {_ImmediateContextMask}
+        ImmediateContextMask {_ImmediateContextMask},
+        CreationNodeMask     {_CreationNodeMask },
+        VisibleNodeMask      {_VisibleNodeMask  }
     {
     }
 
@@ -175,7 +185,9 @@ struct BufferDesc DILIGENT_DERIVE(DeviceObjectAttribs)
                 CPUAccessFlags       == RHS.CPUAccessFlags    &&
                 Mode                 == RHS.Mode              &&
                 ElementByteStride    == RHS.ElementByteStride &&
-                ImmediateContextMask == RHS.ImmediateContextMask;
+                ImmediateContextMask == RHS.ImmediateContextMask &&
+                CreationNodeMask     == RHS.CreationNodeMask     &&
+                VisibleNodeMask      == RHS.VisibleNodeMask;
     }
 #endif
 };

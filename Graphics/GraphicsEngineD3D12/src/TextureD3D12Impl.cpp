@@ -149,6 +149,34 @@ TextureD3D12Impl::TextureD3D12Impl(IReferenceCounters*        pRefCounters,
         }
     }
 
+    // Validate multi-GPU node masks against adapter capabilities
+    if (m_Desc.CreationNodeMask != 0)
+    {
+        const Uint32 ValidNodeMask = pRenderDeviceD3D12->GetAdapterInfo().NodeMask;
+        if ((m_Desc.CreationNodeMask & ~ValidNodeMask) != 0)
+        {
+            LOG_WARNING_MESSAGE("TextureDesc.CreationNodeMask (0x", std::hex, m_Desc.CreationNodeMask,
+                                ") contains bits outside of the adapter's valid NodeMask (0x", ValidNodeMask, std::dec,
+                                "). Clamping to valid mask.");
+            m_Desc.CreationNodeMask &= ValidNodeMask;
+            if (m_Desc.CreationNodeMask == 0)
+                m_Desc.CreationNodeMask = 1;
+        }
+    }
+    if (m_Desc.VisibleNodeMask != 0)
+    {
+        const Uint32 ValidNodeMask = pRenderDeviceD3D12->GetAdapterInfo().NodeMask;
+        if ((m_Desc.VisibleNodeMask & ~ValidNodeMask) != 0)
+        {
+            LOG_WARNING_MESSAGE("TextureDesc.VisibleNodeMask (0x", std::hex, m_Desc.VisibleNodeMask,
+                                ") contains bits outside of the adapter's valid NodeMask (0x", ValidNodeMask, std::dec,
+                                "). Clamping to valid mask.");
+            m_Desc.VisibleNodeMask &= ValidNodeMask;
+            if (m_Desc.VisibleNodeMask == 0)
+                m_Desc.VisibleNodeMask = m_Desc.CreationNodeMask != 0 ? m_Desc.CreationNodeMask : 1;
+        }
+    }
+
     D3D12_RESOURCE_DESC d3d12TexDesc       = GetD3D12TextureDesc();
     const bool          bInitializeTexture = (pInitData != nullptr && pInitData->pSubResources != nullptr && pInitData->NumSubresources > 0);
 
@@ -227,8 +255,9 @@ TextureD3D12Impl::TextureD3D12Impl(IReferenceCounters*        pRefCounters,
         HeapProps.Type                 = D3D12_HEAP_TYPE_DEFAULT;
         HeapProps.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
         HeapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-        HeapProps.CreationNodeMask     = 1;
-        HeapProps.VisibleNodeMask      = 1;
+        // Use descriptor node masks for linked multi-GPU; fall back to node 1 (default single-GPU) when unset.
+        HeapProps.CreationNodeMask     = m_Desc.CreationNodeMask != 0 ? m_Desc.CreationNodeMask : 1;
+        HeapProps.VisibleNodeMask      = m_Desc.VisibleNodeMask  != 0 ? m_Desc.VisibleNodeMask  : HeapProps.CreationNodeMask;
 
         RESOURCE_STATE InitialState = bInitializeTexture ? RESOURCE_STATE_COPY_DEST : RESOURCE_STATE_UNDEFINED;
         SetState(InitialState);
@@ -264,8 +293,9 @@ TextureD3D12Impl::TextureD3D12Impl(IReferenceCounters*        pRefCounters,
             UploadHeapProps.Type                 = D3D12_HEAP_TYPE_UPLOAD;
             UploadHeapProps.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
             UploadHeapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-            UploadHeapProps.CreationNodeMask     = 1;
-            UploadHeapProps.VisibleNodeMask      = 1;
+            // Upload buffer uses the creation node; if cross-GPU upload, keep creation node as the source.
+            UploadHeapProps.CreationNodeMask     = m_Desc.CreationNodeMask != 0 ? m_Desc.CreationNodeMask : 1;
+            UploadHeapProps.VisibleNodeMask      = m_Desc.VisibleNodeMask  != 0 ? m_Desc.VisibleNodeMask  : UploadHeapProps.CreationNodeMask;
 
             D3D12_RESOURCE_DESC UploadBuffDesc{};
             UploadBuffDesc.Dimension          = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -363,8 +393,15 @@ TextureD3D12Impl::TextureD3D12Impl(IReferenceCounters*        pRefCounters,
 
         StaginHeapProps.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
         StaginHeapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-        StaginHeapProps.CreationNodeMask     = 1;
-        StaginHeapProps.VisibleNodeMask      = 1;
+        // Linked multi-GPU: like the other resources, honor the descriptor's node masks. When they are
+        // not set, CPU-accessible staging memory is made visible to every node so that any node's
+        // queue can copy to or from it. Single-node adapters keep node mask 1 (unchanged).
+        const Uint32 AdapterNodeMask         = pRenderDeviceD3D12->GetAdapterInfo().NodeMask;
+        StaginHeapProps.CreationNodeMask     = m_Desc.CreationNodeMask != 0 ? m_Desc.CreationNodeMask : 1;
+        StaginHeapProps.VisibleNodeMask      = m_Desc.VisibleNodeMask != 0 ? m_Desc.VisibleNodeMask : (AdapterNodeMask > 1 ? AdapterNodeMask : StaginHeapProps.CreationNodeMask);
+        // Without cross-node sharing a resource is visible to its creation node only
+        if (m_Desc.VisibleNodeMask == 0 && pRenderDeviceD3D12->GetCrossNodeVisibleMask() == 0)
+            StaginHeapProps.VisibleNodeMask = StaginHeapProps.CreationNodeMask;
 
         UINT64 stagingBufferSize = 0;
         Uint32 NumSubresources   = Uint32{d3d12TexDesc.MipLevels} * (d3d12TexDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : Uint32{d3d12TexDesc.DepthOrArraySize});

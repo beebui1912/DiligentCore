@@ -483,6 +483,16 @@ void SwapChainVkImpl::CreateVulkanSwapChain()
     const VulkanUtilities::LogicalDevice& LogicalDevice = pRenderDeviceVk->GetLogicalDevice();
     VkDevice                              vkDevice      = pRenderDeviceVk->GetVkDevice();
 
+    // Linked multi-GPU: Enable device group swapchain if multiple nodes are available.
+    VkDeviceGroupSwapchainCreateInfoKHR DeviceGroupSwapchainCI{};
+    if (pRenderDeviceVk->GetAdapterInfo().NodeCount > 1)
+    {
+        DeviceGroupSwapchainCI.sType = VK_STRUCTURE_TYPE_DEVICE_GROUP_SWAPCHAIN_CREATE_INFO_KHR;
+        DeviceGroupSwapchainCI.modes = VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR;
+        DeviceGroupSwapchainCI.pNext = swapchain_ci.pNext;
+        swapchain_ci.pNext           = &DeviceGroupSwapchainCI;
+    }
+
     err = vkCreateSwapchainKHR(vkDevice, &swapchain_ci, NULL, &m_VkSwapChain);
     CHECK_VK_ERROR_AND_THROW(err, "Failed to create Vulkan swapchain");
 
@@ -727,6 +737,21 @@ void SwapChainVkImpl::Present(Uint32 SyncInterval)
             PresentInfo.pSwapchains     = &m_VkSwapChain;
             PresentInfo.pImageIndices   = &m_BackBufferIndex;
             PresentInfo.pResults        = &Result;
+
+            // Linked multi-GPU: specify which device presents the image.
+            // Use LOCAL present mode — the image was rendered on the presenting device (node 0).
+            VkDeviceGroupPresentInfoKHR DeviceGroupPresentInfo{};
+            uint32_t                    PresentDeviceMask = 1; // node 0 by default
+            if (pDeviceVk->GetAdapterInfo().NodeCount > 1)
+            {
+                DeviceGroupPresentInfo.sType          = VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR;
+                DeviceGroupPresentInfo.swapchainCount = 1;
+                DeviceGroupPresentInfo.pDeviceMasks   = &PresentDeviceMask;
+                DeviceGroupPresentInfo.mode           = VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR;
+                DeviceGroupPresentInfo.pNext          = PresentInfo.pNext;
+                PresentInfo.pNext                     = &DeviceGroupPresentInfo;
+            }
+
             pDeviceVk->LockCmdQueueAndRun(
                 pImmediateCtxVk->GetCommandQueueId(),
                 [&PresentInfo](ICommandQueueVk* pCmdQueueVk) //

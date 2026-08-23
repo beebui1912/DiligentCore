@@ -40,7 +40,8 @@ CommandQueueVkImpl::CommandQueueVkImpl(IReferenceCounters*                      
                                        SoftwareQueueIndex                              CommandQueueId,
                                        Uint32                                          NumCommandQueues,
                                        Uint32                                          vkQueueIndex,
-                                       const ImmediateContextCreateInfo&               CreateInfo) :
+                                       const ImmediateContextCreateInfo&               CreateInfo,
+                                       bool                                            IsLinkedGpuMode) :
     // clang-format off
     TBase{pRefCounters},
     m_LogicalDevice             {LogicalDevice},
@@ -49,6 +50,8 @@ CommandQueueVkImpl::CommandQueueVkImpl(IReferenceCounters*                      
     m_CommandQueueId            {static_cast<Uint8>(CommandQueueId)},
     m_SupportedTimelineSemaphore{LogicalDevice->GetEnabledExtFeatures().TimelineSemaphore.timelineSemaphore == VK_TRUE},
     m_NumCommandQueues          {static_cast<Uint8>(m_SupportedTimelineSemaphore ? 1u : NumCommandQueues)},
+    m_NodeIndex                 {CreateInfo.NodeIndex},
+    m_IsLinkedGpuMode           {IsLinkedGpuMode},
     m_NextFenceValue            {1},
     m_SyncObjectManager         {std::make_shared<VulkanUtilities::SyncObjectManager>(*LogicalDevice)},
     m_SyncPointAllocator        {GetRawAllocator(), SyncPointVk::SizeOf(m_NumCommandQueues), 16}
@@ -178,6 +181,47 @@ Uint64 CommandQueueVkImpl::Submit(const VkSubmitInfo& InSubmitInfo)
     VkSubmitInfo SubmitInfo         = InSubmitInfo;
     SubmitInfo.signalSemaphoreCount = static_cast<Uint32>(m_TempSignalSemaphores.size());
     SubmitInfo.pSignalSemaphores    = m_TempSignalSemaphores.data();
+
+    // Linked multi-GPU: chain VkDeviceGroupSubmitInfo to specify which GPU node
+    // executes command buffers, signals semaphores, and waits on semaphores.
+    VkDeviceGroupSubmitInfo DeviceGroupSubmitInfo{};
+    std::vector<uint32_t>   CmdBufferDeviceMasks;
+    std::vector<uint32_t>   SignalSemaphoreDeviceIndices;
+    std::vector<uint32_t>   WaitSemaphoreDeviceIndices;
+
+    if (m_IsLinkedGpuMode)
+    {
+        DeviceGroupSubmitInfo.sType = VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO;
+        DeviceGroupSubmitInfo.pNext = SubmitInfo.pNext;
+
+        const uint32_t NodeDeviceMask = 1u << m_NodeIndex;
+
+        // All command buffers in this submission run on this queue's node
+        if (SubmitInfo.commandBufferCount > 0)
+        {
+            CmdBufferDeviceMasks.resize(SubmitInfo.commandBufferCount, NodeDeviceMask);
+            DeviceGroupSubmitInfo.commandBufferCount      = SubmitInfo.commandBufferCount;
+            DeviceGroupSubmitInfo.pCommandBufferDeviceMasks = CmdBufferDeviceMasks.data();
+        }
+
+        // All signal semaphores are signaled from this queue's node
+        if (SubmitInfo.signalSemaphoreCount > 0)
+        {
+            SignalSemaphoreDeviceIndices.resize(SubmitInfo.signalSemaphoreCount, m_NodeIndex);
+            DeviceGroupSubmitInfo.signalSemaphoreCount        = SubmitInfo.signalSemaphoreCount;
+            DeviceGroupSubmitInfo.pSignalSemaphoreDeviceIndices = SignalSemaphoreDeviceIndices.data();
+        }
+
+        // Wait semaphores: assume signaled by same node (caller can override via pNext chain)
+        if (SubmitInfo.waitSemaphoreCount > 0)
+        {
+            WaitSemaphoreDeviceIndices.resize(SubmitInfo.waitSemaphoreCount, m_NodeIndex);
+            DeviceGroupSubmitInfo.waitSemaphoreCount        = SubmitInfo.waitSemaphoreCount;
+            DeviceGroupSubmitInfo.pWaitSemaphoreDeviceIndices = WaitSemaphoreDeviceIndices.data();
+        }
+
+        SubmitInfo.pNext = &DeviceGroupSubmitInfo;
+    }
 
     const uint32_t SubmitCount =
         (SubmitInfo.waitSemaphoreCount != 0 ||

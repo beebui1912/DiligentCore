@@ -104,7 +104,8 @@ public:
                        SoftwareQueueIndex                              CommandQueueId,
                        Uint32                                          NumCommandQueues,
                        Uint32                                          vkQueueIndex,
-                       const ImmediateContextCreateInfo&               CreateInfo);
+                       const ImmediateContextCreateInfo&               CreateInfo,
+                       bool                                            IsLinkedGpuMode = false);
     ~CommandQueueVkImpl();
 
     IMPLEMENT_QUERY_INTERFACE_IN_PLACE(IID_CommandQueueVk, TBase)
@@ -167,6 +168,8 @@ private:
     const SoftwareQueueIndex m_CommandQueueId;
     const bool               m_SupportedTimelineSemaphore;
     const Uint8              m_NumCommandQueues;
+    const Uint8              m_NodeIndex;  // GPU node index for linked multi-GPU (0-based)
+    const bool               m_IsLinkedGpuMode; // True if VK_KHR_device_group is active
 
     // Fence is signaled right after a command buffer has been
     // submitted to the command queue for execution.

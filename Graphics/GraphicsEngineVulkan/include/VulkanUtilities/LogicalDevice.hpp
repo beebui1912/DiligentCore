@@ -128,6 +128,14 @@ public:
         return m_VkDevice;
     }
 
+#if DILIGENT_USE_VOLK
+    // Per-device function-pointer table. Unlike volkLoadDevice() (which rebinds the single set of
+    // global pointers to one device), a dedicated table lets multiple Vulkan devices coexist and
+    // each dispatch its own optimized device-level entry points. Used for the per-frame hot paths
+    // (command recording and queue submission).
+    const VolkDeviceTable& GetVkTable() const { return m_VkTable; }
+#endif
+
     void WaitIdle() const;
 
     // clang-format off
@@ -268,6 +276,10 @@ private:
     ExtensionFeatures                  m_EnabledExtFeatures = {};
     std::vector<VkPipelineStageFlags>  m_SupportedStagesMask;
     std::vector<VkAccessFlags>         m_SupportedAccessMask;
+
+#if DILIGENT_USE_VOLK
+    VolkDeviceTable m_VkTable{};
+#endif
 };
 
 } // namespace VulkanUtilities

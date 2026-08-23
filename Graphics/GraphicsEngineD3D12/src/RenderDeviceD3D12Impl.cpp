@@ -161,11 +161,8 @@ RenderDeviceD3D12Impl::RenderDeviceD3D12Impl(IReferenceCounters*          pRefCo
         {RawMemAllocator, *this, EngineCI.CPUDescriptorHeapAllocationSize[2], D3D12_DESCRIPTOR_HEAP_TYPE_RTV,         D3D12_DESCRIPTOR_HEAP_FLAG_NONE},
         {RawMemAllocator, *this, EngineCI.CPUDescriptorHeapAllocationSize[3], D3D12_DESCRIPTOR_HEAP_TYPE_DSV,         D3D12_DESCRIPTOR_HEAP_FLAG_NONE}
     },
-    m_GPUDescriptorHeaps
-    {
-        {RawMemAllocator, *this, EngineCI.GPUDescriptorHeapSize[0], EngineCI.GPUDescriptorHeapDynamicSize[0], D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE},
-        {RawMemAllocator, *this, EngineCI.GPUDescriptorHeapSize[1], EngineCI.GPUDescriptorHeapDynamicSize[1], D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,     D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE}
-    },
+    m_GPUDescriptorHeaps{},
+    m_NodeCount{AdapterInfo.NodeCount},
     m_CmdListManagers
     {
         {*this, D3D12_COMMAND_LIST_TYPE_DIRECT},
@@ -180,6 +177,30 @@ RenderDeviceD3D12Impl::RenderDeviceD3D12Impl(IReferenceCounters*          pRefCo
 // clang-format on
 {
     m_DeviceInfo.Type = RENDER_DEVICE_TYPE_D3D12;
+
+    // Linked adapter: whether resources may be visible to nodes other than their creation node
+    if (m_NodeCount > 1)
+    {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS Options{};
+        m_CrossNodeSharing = SUCCEEDED(pd3d12Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &Options, sizeof(Options))) &&
+            Options.CrossNodeSharingTier != D3D12_CROSS_NODE_SHARING_TIER_NOT_SUPPORTED;
+    }
+
+    // Create per-node GPU descriptor heaps
+    for (Uint32 node = 0; node < m_NodeCount && node < DILIGENT_MAX_LINKED_GPU_NODES; ++node)
+    {
+        const UINT NodeMask = 1u << node;
+        m_GPUDescriptorHeaps[node][0] = std::make_unique<GPUDescriptorHeap>(
+            RawMemAllocator, *this,
+            EngineCI.GPUDescriptorHeapSize[0], EngineCI.GPUDescriptorHeapDynamicSize[0],
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            NodeMask);
+        m_GPUDescriptorHeaps[node][1] = std::make_unique<GPUDescriptorHeap>(
+            RawMemAllocator, *this,
+            EngineCI.GPUDescriptorHeapSize[1], EngineCI.GPUDescriptorHeapDynamicSize[1],
+            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            NodeMask);
+    }
 
     try
     {
@@ -259,9 +280,12 @@ RenderDeviceD3D12Impl::RenderDeviceD3D12Impl(IReferenceCounters*          pRefCo
         m_QueryMgrs.reserve(CommandQueueCount);
         for (Uint32 q = 0; q < CommandQueueCount; ++q)
         {
-            const D3D12_COMMAND_LIST_TYPE d3d12CmdListType = ppCmdQueues[q]->GetD3D12CommandQueueDesc().Type;
-            const HardwareQueueIndex      HWQueueId        = D3D12CommandListTypeToQueueId(d3d12CmdListType);
-            m_QueryMgrs.emplace_back(std::make_unique<QueryManagerD3D12>(this, EngineCI.QueryPoolSizes, SoftwareQueueIndex{q}, HWQueueId));
+            const D3D12_COMMAND_QUEUE_DESC d3d12QueueDesc   = ppCmdQueues[q]->GetD3D12CommandQueueDesc();
+            const D3D12_COMMAND_LIST_TYPE  d3d12CmdListType = d3d12QueueDesc.Type;
+            const HardwareQueueIndex       HWQueueId        = D3D12CommandListTypeToQueueId(d3d12CmdListType);
+            // Linked multi-GPU: queries live on the node of their queue. Single-node adapters keep mask 0.
+            const UINT QueryNodeMask = m_NodeCount > 1 ? d3d12QueueDesc.NodeMask : 0u;
+            m_QueryMgrs.emplace_back(std::make_unique<QueryManagerD3D12>(this, EngineCI.QueryPoolSizes, SoftwareQueueIndex{q}, HWQueueId, QueryNodeMask));
         }
 
         if (IsNvApiEnabled())
@@ -307,9 +331,13 @@ RenderDeviceD3D12Impl::~RenderDeviceD3D12Impl()
     {
         DEV_CHECK_ERR(m_CPUDescriptorHeaps[i].DvpGetTotalAllocationCount() == 0, "All CPU descriptor heap allocations must be released");
     }
-    for (size_t i = 0; i < _countof(m_GPUDescriptorHeaps); ++i)
+    for (Uint32 node = 0; node < m_NodeCount; ++node)
     {
-        DEV_CHECK_ERR(m_GPUDescriptorHeaps[i].DvpGetTotalAllocationCount() == 0, "All GPU descriptor heap allocations must be released");
+        for (size_t i = 0; i < 2; ++i)
+        {
+            if (m_GPUDescriptorHeaps[node][i])
+                DEV_CHECK_ERR(m_GPUDescriptorHeaps[node][i]->DvpGetTotalAllocationCount() == 0, "All GPU descriptor heap allocations must be released");
+        }
     }
 #endif
 
@@ -476,6 +504,18 @@ void RenderDeviceD3D12Impl::ReleaseStaleResources(bool ForceRelease)
 RenderDeviceD3D12Impl::PooledCommandContext RenderDeviceD3D12Impl::AllocateCommandContext(SoftwareQueueIndex CommandQueueId, const Char* ID)
 {
     CommandListManager& CmdListMngr = GetCmdListManager(CommandQueueId);
+
+    // Linked Multi-GPU: route the command list to the GPU node its command queue targets. The queue's
+    // node mask was set at creation (EngineFactoryD3D12). For single-GPU (m_NodeCount == 1) we keep the
+    // default node mask 1 without querying the queue, so behavior is identical to the legacy path.
+    UINT NodeMask = 1;
+    if (m_NodeCount > 1)
+    {
+        NodeMask = GetCommandQueue(CommandQueueId).GetD3D12CommandQueueDesc().NodeMask;
+        if (NodeMask == 0)
+            NodeMask = 1;
+    }
+
     {
         std::lock_guard<std::mutex> Guard{m_ContextPoolMutex};
 
@@ -484,7 +524,7 @@ RenderDeviceD3D12Impl::PooledCommandContext RenderDeviceD3D12Impl::AllocateComma
         {
             PooledCommandContext Ctx = std::move(pool_it->second);
             m_ContextPool.erase(pool_it);
-            Ctx->Reset(CmdListMngr);
+            Ctx->Reset(CmdListMngr, NodeMask);
             Ctx->SetID(ID);
 #ifdef DILIGENT_DEVELOPMENT
             m_AllocatedCtxCounter.fetch_add(1);
@@ -495,7 +535,7 @@ RenderDeviceD3D12Impl::PooledCommandContext RenderDeviceD3D12Impl::AllocateComma
 
     IMemoryAllocator& CmdCtxAllocator = GetRawAllocator();
     CommandContext*   pRawMem         = ALLOCATE(CmdCtxAllocator, "CommandContext instance", CommandContext, 1);
-    CommandContext*   pCtx            = new (pRawMem) CommandContext(CmdListMngr);
+    CommandContext*   pCtx            = new (pRawMem) CommandContext(CmdListMngr, NodeMask);
     pCtx->SetID(ID);
 #ifdef DILIGENT_DEVELOPMENT
     m_AllocatedCtxCounter.fetch_add(1);
@@ -706,7 +746,30 @@ DescriptorHeapAllocation RenderDeviceD3D12Impl::AllocateDescriptors(D3D12_DESCRI
 DescriptorHeapAllocation RenderDeviceD3D12Impl::AllocateGPUDescriptors(D3D12_DESCRIPTOR_HEAP_TYPE Type, UINT Count /*= 1*/)
 {
     VERIFY(Type >= D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && Type <= D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, "Invalid heap type");
-    return m_GPUDescriptorHeaps[Type].Allocate(Count);
+    // Static/mutable descriptors are allocated from node 0's heap.
+    DescriptorHeapAllocation Allocation = m_GPUDescriptorHeaps[0][Type]->Allocate(Count);
+
+    // Linked multi-GPU: a shader-visible descriptor heap belongs to exactly one node, and a command
+    // list recorded for node N must bind node N's heap. Since an SRB may be used on several nodes,
+    // mirror the allocation onto every other node's heap so the same descriptors are reachable from
+    // each node. The commit path (PipelineResourceSignatureD3D12Impl) then binds the node that
+    // matches the executing context. For single-GPU (m_NodeCount == 1) this loop does not run and
+    // the returned allocation is exactly node 0's, identical to the legacy path.
+    if (m_NodeCount > 1 && !Allocation.IsNull())
+    {
+        for (Uint32 node = 1; node < m_NodeCount && node < DILIGENT_MAX_LINKED_GPU_NODES; ++node)
+        {
+            if (!m_GPUDescriptorHeaps[node][Type])
+                continue;
+            DescriptorHeapAllocation Mirror = m_GPUDescriptorHeaps[node][Type]->Allocate(Count);
+            DEV_CHECK_ERR(!Mirror.IsNull(),
+                          "Failed to allocate ", Count, " GPU-visible descriptor(s) on linked GPU node ", node,
+                          ". Consider increasing GPUDescriptorHeapSize[", static_cast<Uint32>(Type), "] in EngineD3D12CreateInfo.");
+            Allocation.AddNodeMirror(std::move(Mirror));
+        }
+    }
+
+    return Allocation;
 }
 
 void RenderDeviceD3D12Impl::CreateRootSignature(const RefCntAutoPtr<PipelineResourceSignatureD3D12Impl>* ppSignatures, Uint32 SignatureCount, size_t Hash, RootSignatureD3D12** ppRootSig)

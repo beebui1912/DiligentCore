@@ -47,6 +47,34 @@ BottomLevelASD3D12Impl::BottomLevelASD3D12Impl(IReferenceCounters*      pRefCoun
     const RayTracingProperties& RTProps                  = pDeviceD3D12->GetAdapterInfo().RayTracing;
     UINT64                      ResultDataMaxSizeInBytes = 0;
 
+    // Validate multi-GPU node masks against adapter capabilities
+    if (m_Desc.CreationNodeMask != 0)
+    {
+        const Uint32 ValidNodeMask = pDeviceD3D12->GetAdapterInfo().NodeMask;
+        if ((m_Desc.CreationNodeMask & ~ValidNodeMask) != 0)
+        {
+            LOG_WARNING_MESSAGE("BottomLevelASDesc.CreationNodeMask (0x", std::hex, m_Desc.CreationNodeMask,
+                                ") contains bits outside of the adapter's valid NodeMask (0x", ValidNodeMask, std::dec,
+                                "). Clamping to valid mask.");
+            m_Desc.CreationNodeMask &= ValidNodeMask;
+            if (m_Desc.CreationNodeMask == 0)
+                m_Desc.CreationNodeMask = 1;
+        }
+    }
+    if (m_Desc.VisibleNodeMask != 0)
+    {
+        const Uint32 ValidNodeMask = pDeviceD3D12->GetAdapterInfo().NodeMask;
+        if ((m_Desc.VisibleNodeMask & ~ValidNodeMask) != 0)
+        {
+            LOG_WARNING_MESSAGE("BottomLevelASDesc.VisibleNodeMask (0x", std::hex, m_Desc.VisibleNodeMask,
+                                ") contains bits outside of the adapter's valid NodeMask (0x", ValidNodeMask, std::dec,
+                                "). Clamping to valid mask.");
+            m_Desc.VisibleNodeMask &= ValidNodeMask;
+            if (m_Desc.VisibleNodeMask == 0)
+                m_Desc.VisibleNodeMask = m_Desc.CreationNodeMask != 0 ? m_Desc.CreationNodeMask : 1;
+        }
+    }
+
     if (m_Desc.CompactedSize)
     {
         ResultDataMaxSizeInBytes = m_Desc.CompactedSize;
@@ -133,8 +161,9 @@ BottomLevelASD3D12Impl::BottomLevelASD3D12Impl(IReferenceCounters*      pRefCoun
     HeapProps.Type                 = D3D12_HEAP_TYPE_DEFAULT;
     HeapProps.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
     HeapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-    HeapProps.CreationNodeMask     = 1;
-    HeapProps.VisibleNodeMask      = 1;
+    // Use descriptor node masks for linked multi-GPU; fall back to node 1 (default single-GPU node) when unset.
+    HeapProps.CreationNodeMask     = m_Desc.CreationNodeMask != 0 ? m_Desc.CreationNodeMask : 1;
+    HeapProps.VisibleNodeMask      = m_Desc.VisibleNodeMask  != 0 ? m_Desc.VisibleNodeMask  : HeapProps.CreationNodeMask;
 
     D3D12_RESOURCE_DESC ASDesc{};
     ASDesc.Dimension          = D3D12_RESOURCE_DIMENSION_BUFFER;

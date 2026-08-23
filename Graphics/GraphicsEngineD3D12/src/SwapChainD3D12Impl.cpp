@@ -90,6 +90,11 @@ void SwapChainD3D12Impl::InitBuffersAndViews()
         String      Name = "Main back buffer ";
         Name += std::to_string(backbuff);
         BackBufferDesc.Name = Name.c_str();
+        // Swap chain back buffers are always on node 0 (the presenting node).
+        // In linked multi-GPU, frames rendered on other nodes must be copied to
+        // a node-0-visible resource before being presented.
+        BackBufferDesc.CreationNodeMask = 1;
+        BackBufferDesc.VisibleNodeMask  = m_pRenderDevice.RawPtr<RenderDeviceD3D12Impl>()->GetAdapterInfo().NodeMask;
 
         RefCntAutoPtr<TextureD3D12Impl> pBackBufferTex;
         m_pRenderDevice.RawPtr<RenderDeviceD3D12Impl>()->CreateTexture(BackBufferDesc, pBackBuffer, RESOURCE_STATE_UNDEFINED, &pBackBufferTex);

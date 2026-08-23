@@ -30,6 +30,7 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
+#include <unordered_map>
 #include <stdint.h>
 #include "IndexWrapper.hpp"
 
@@ -51,10 +52,15 @@ public:
     CommandListManager& operator = (      CommandListManager&&) = delete;
     // clang-format on
 
-    // Returns the maximum supported interface version
-    void CreateNewCommandList(ID3D12GraphicsCommandList** ppList, ID3D12CommandAllocator** ppAllocator, Uint32& IfaceVersion);
+    // Returns the maximum supported interface version.
+    // NodeMask selects the GPU node the command list and its allocator target in Linked Multi-GPU mode.
+    // The default (1) is node 0, which matches the legacy single-GPU behavior.
+    void CreateNewCommandList(ID3D12GraphicsCommandList** ppList, ID3D12CommandAllocator** ppAllocator, Uint32& IfaceVersion, UINT NodeMask = 1);
 
-    void RequestAllocator(ID3D12CommandAllocator** ppAllocator);
+    // NodeMask selects the node pool the allocator comes from. A D3D12 command allocator becomes
+    // associated with the node of the first command list it records, so allocators must not be shared
+    // across nodes; they are pooled per node mask. Default (1) is node 0 (legacy single-GPU behavior).
+    void RequestAllocator(ID3D12CommandAllocator** ppAllocator, UINT NodeMask = 1);
     void ReleaseAllocator(CComPtr<ID3D12CommandAllocator>&& Allocator, SoftwareQueueIndex CmdQueue, Uint64 FenceValue);
 
     // Returns allocator to the list of available allocators. The GPU must have finished using the
@@ -74,8 +80,13 @@ public:
     }
 
 private:
-    std::mutex                                                                                        m_AllocatorMutex;
-    std::vector<CComPtr<ID3D12CommandAllocator>, STDAllocatorRawMem<CComPtr<ID3D12CommandAllocator>>> m_FreeAllocators;
+    std::mutex m_AllocatorMutex;
+    // Free command allocators pooled per GPU node mask. For single-GPU there is a single entry
+    // (node mask 1), so behavior matches the legacy single-pool implementation.
+    std::unordered_map<UINT, std::vector<CComPtr<ID3D12CommandAllocator>>> m_FreeAllocators;
+    // Tracks the node mask each allocator was created for, so FreeAllocator() returns it to the
+    // correct per-node pool. Entries persist for the lifetime of the allocator.
+    std::unordered_map<ID3D12CommandAllocator*, UINT> m_AllocatorNodeMask;
 
     RenderDeviceD3D12Impl& m_DeviceD3D12Impl;
 

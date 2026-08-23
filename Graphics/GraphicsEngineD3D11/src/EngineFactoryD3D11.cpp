@@ -232,6 +232,14 @@ void EngineFactoryD3D11Impl::CreateDeviceAndContextsD3D11(const EngineD3D11Creat
         return;
     }
 
+    // Direct3D 11 does not expose node-mask multi-adapter APIs; linked mode is not supported.
+    if (EngineCI.GpuMode == GPU_MODE_LINKED)
+    {
+        LOG_WARNING_MESSAGE("Linked Multi-GPU (GPU_MODE_LINKED) is not supported by the Direct3D 11 backend. "
+                            "Falling back to single-GPU mode. Use GPU_MODE_UNLINKED with multiple IRenderDevice "
+                            "instances and CrossDeviceTransferManager for multi-GPU workloads under D3D11.");
+    }
+
     *ppDevice = nullptr;
     memset(ppContexts, 0, sizeof(*ppContexts) * (size_t{std::max(1u, EngineCI.NumImmediateContexts)} + size_t{EngineCI.NumDeferredContexts}));
 

@@ -100,6 +100,20 @@ DeviceContextVkImpl::DeviceContextVkImpl(IReferenceCounters*      pRefCounters,
     }
 // clang-format on
 {
+#if DILIGENT_USE_VOLK
+    // Route this context's command-buffer calls through the owning device's optimized per-device
+    // function table so that multiple Vulkan devices can record commands simultaneously without
+    // clobbering each other's global function pointers (see VulkanUtilities::CommandBuffer).
+    m_CommandBuffer.SetDeviceTable(&m_pDevice->GetLogicalDevice().GetVkTable());
+#endif
+
+    // Linked multi-GPU (VK_KHR_device_group): when the device spans multiple linked nodes, scope all
+    // command buffers recorded by this context to the node it targets via vkCmdSetDeviceMaskKHR.
+    // Only immediate contexts carry a node index; deferred contexts inherit the mask at execution.
+    // Left at 0 (no-op) for single-GPU and unlinked mode so the recording path is unchanged.
+    if (m_pDevice->GetAdapterInfo().NodeCount > 1)
+        m_CmdBufferDeviceMask = 1u << m_Desc.NodeIndex;
+
     if (!IsDeferred())
     {
         PrepareCommandPool(GetCommandQueueId());

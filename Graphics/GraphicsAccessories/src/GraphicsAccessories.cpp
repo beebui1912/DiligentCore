@@ -1626,6 +1626,20 @@ const char* GetAdapterTypeString(ADAPTER_TYPE AdapterType, bool bGetEnumString)
     }
 }
 
+const char* GetGpuModeString(GPU_MODE GpuMode, bool bGetEnumString)
+{
+    static_assert(GPU_MODE_COUNT == 3, "Did you add a new GPU mode? Please update the switch below.");
+    switch (GpuMode)
+    {
+        // clang-format off
+        case GPU_MODE_SINGLE:   return bGetEnumString ? "GPU_MODE_SINGLE"   : "Single";   break;
+        case GPU_MODE_LINKED:   return bGetEnumString ? "GPU_MODE_LINKED"   : "Linked";   break;
+        case GPU_MODE_UNLINKED: return bGetEnumString ? "GPU_MODE_UNLINKED" : "Unlinked"; break;
+        // clang-format on
+        default: UNEXPECTED("Unknown/unsupported GPU mode"); return "UNKNOWN";
+    }
+}
+
 String GetPipelineResourceFlagsString(PIPELINE_RESOURCE_FLAGS Flags, bool GetFullName /*= false*/, const char* DelimiterString /*= "|"*/)
 {
     if (Flags == PIPELINE_RESOURCE_FLAG_NONE)

@@ -86,13 +86,18 @@ GenerateMipsHelper::GenerateMipsHelper(ID3D12Device* pd3d12Device)
 
     HRESULT hr = D3D12SerializeRootSignature(&RootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
 
-    hr = pd3d12Device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), __uuidof(m_pGenerateMipsRS), reinterpret_cast<void**>(static_cast<ID3D12RootSignature**>(&m_pGenerateMipsRS)));
+    // Same node mask as RenderDeviceD3D12Impl::GetSharedNodeMask(): 0 on a single-node adapter, all
+    // linked nodes otherwise, so that mips can be generated on any node.
+    const UINT NodeCount = std::min(pd3d12Device->GetNodeCount(), UINT{DILIGENT_MAX_LINKED_GPU_NODES});
+    const UINT NodeMask  = NodeCount > 1 ? (1u << NodeCount) - 1u : 0u;
+
+    hr = pd3d12Device->CreateRootSignature(NodeMask, signature->GetBufferPointer(), signature->GetBufferSize(), __uuidof(m_pGenerateMipsRS), reinterpret_cast<void**>(static_cast<ID3D12RootSignature**>(&m_pGenerateMipsRS)));
     CHECK_D3D_RESULT_THROW(hr, "Failed to create root signature for mipmap generation");
 
     D3D12_COMPUTE_PIPELINE_STATE_DESC PSODesc = {};
 
     PSODesc.pRootSignature = m_pGenerateMipsRS;
-    PSODesc.NodeMask       = 0;
+    PSODesc.NodeMask       = NodeMask;
     PSODesc.Flags          = D3D12_PIPELINE_STATE_FLAG_NONE;
 
 #define CreatePSO(PSO, ShaderByteCode)                                                                                                                                      \
