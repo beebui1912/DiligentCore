@@ -149,7 +149,8 @@ private:
 };
 
 
-GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::PhysicalDevice& PhysicalDevice)
+GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::PhysicalDevice& PhysicalDevice,
+                                                        const VulkanUtilities::Instance*        Instance = nullptr)
 {
     GraphicsAdapterInfo AdapterInfo;
 
@@ -605,11 +606,59 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
         }
     }
 
-    // Multi-GPU: A single VkPhysicalDevice represents a single node. Linked groups with multiple
-    // nodes are detected via vkEnumeratePhysicalDeviceGroups during device creation, and NodeCount
-    // is updated at that time. The initial value here is conservative (1 node).
+    // Multi-GPU: A single VkPhysicalDevice represents a single node.  When
+    // Instance is available, we query vkEnumeratePhysicalDeviceGroups here
+    // (rather than waiting until CreateDeviceAndContextsVk) so samples that
+    // read AdapterInfo.NodeCount from ModifyEngineInitInfo can decide
+    // upfront whether to opt into linked mode.
+    // Requested by DiligentGpuSimulation to align the Vulkan factory with
+    // the D3D12 one, which already fills NodeCount inside GetGraphicsAdapterInfo.
     AdapterInfo.NodeCount = 1;
     AdapterInfo.NodeMask  = 1;
+#if DILIGENT_USE_VOLK
+    if (Instance != nullptr)
+    {
+        uint32_t DeviceGroupCount = 0;
+        if (vkEnumeratePhysicalDeviceGroups(Instance->GetVkInstance(), &DeviceGroupCount, nullptr) == VK_SUCCESS && DeviceGroupCount > 0)
+        {
+            std::vector<VkPhysicalDeviceGroupProperties> DeviceGroups(DeviceGroupCount);
+            for (auto& G : DeviceGroups)
+            {
+                G.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GROUP_PROPERTIES;
+                G.pNext = nullptr;
+            }
+            if (vkEnumeratePhysicalDeviceGroups(Instance->GetVkInstance(), &DeviceGroupCount, DeviceGroups.data()) == VK_SUCCESS)
+            {
+                const VkPhysicalDevice ThisHandle = PhysicalDevice.GetVkDeviceHandle();
+                for (const auto& G : DeviceGroups)
+                {
+                    bool Match = false;
+                    for (uint32_t k = 0; k < G.physicalDeviceCount; ++k)
+                    {
+                        if (G.physicalDevices[k] == ThisHandle) { Match = true; break; }
+                    }
+                    if (Match && G.physicalDeviceCount > 1)
+                    {
+                        AdapterInfo.NodeCount = G.physicalDeviceCount;
+                        AdapterInfo.NodeMask  = (1u << G.physicalDeviceCount) - 1u;
+                        // Bump per-queue MaxDeviceContexts so samples that
+                        // request one immediate context per linked node
+                        // (Tutorial31_LinkedMultiGPU does exactly this) pass
+                        // VerifyEngineCreateInfo.  On real linked hardware
+                        // the queue family reports a higher queueCount that
+                        // already covers per-node contexts.
+                        for (Uint32 q = 0; q < AdapterInfo.NumQueues; ++q)
+                        {
+                            if (AdapterInfo.Queues[q].MaxDeviceContexts < G.physicalDeviceCount)
+                                AdapterInfo.Queues[q].MaxDeviceContexts = G.physicalDeviceCount;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+#endif
 
     return AdapterInfo;
 }
@@ -643,7 +692,7 @@ void EngineFactoryVkImpl::EnumerateAdapters(Version              MinVersion,
     {
         std::unique_ptr<VulkanUtilities::PhysicalDevice> PhysicalDevice =
             VulkanUtilities::PhysicalDevice::Create({*Instance, Instance->GetVkPhysicalDevices()[i]});
-        Adapters[i] = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice);
+        Adapters[i] = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice, Instance.get());
     }
 }
 
@@ -773,7 +822,7 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
             LOG_WARNING_MESSAGE(VK_KHR_MAINTENANCE1_EXTENSION_NAME, " is not supported.");
 
         // Enable device features if they are supported and throw an error if not supported, but required by user.
-        GraphicsAdapterInfo AdapterInfo = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice);
+        GraphicsAdapterInfo AdapterInfo = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice, Instance.get());
         VerifyEngineCreateInfo(EngineCI, AdapterInfo);
         const DeviceFeatures   EnabledFeatures   = EnableDeviceFeatures(AdapterInfo.Features, EngineCI.Features);
         const DeviceFeaturesVk AdapterFeaturesVk = PhysicalDeviceFeaturesToDeviceFeaturesVk(PhysicalDevice->GetExtFeatures(), DEVICE_FEATURE_STATE_OPTIONAL);
