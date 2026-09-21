@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2025 Diligent Graphics LLC
+ *  Copyright 2019-2026 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -1013,9 +1013,10 @@ vec4 _frexp(vec4 f4, out vec4 fexp4)
 #define SampleGrad_5(Tex, Sampler, Coords, DDX, DDY, Offset) textureGradOffset(Tex, _ToVec(Coords), _ToVec(DDX), _ToVec(DDY), Offset)
 
 // https://www.opengl.org/sdk/docs/man/html/textureQueryLod.xhtml
-// The mipmap array(s) that would be accessed is returned in the x component of the return value.
-// The computed level-of-detail relative to the base level is returned in the y component of the return value.
-#define CalculateLevelOfDetail_2(Tex, Sampler, Coords) textureQueryLod(Tex, _ToVec(Coords)).y
+// The accessed mip level, after clamping and filtering, is returned in the x component.
+// The computed level-of-detail, after bias but before clamping, is returned in the y component.
+#define CalculateLevelOfDetail_2(Tex, Sampler, Coords) textureQueryLod(Tex, _ToVec(Coords)).x
+#define CalculateLevelOfDetailUnclamped_2(Tex, Sampler, Coords) textureQueryLod(Tex, _ToVec(Coords)).y
 
 // texelFetch performs a lookup of a single texel from texture coordinate P in the texture
 // bound to sampler. The array layer is specified in the last component of P for array forms.
@@ -1186,8 +1187,13 @@ out gl_PerVertex
 };
 #endif
 
-#define _GET_GL_VERTEX_ID(VertexId)_TypeConvertStore(VertexId, gl_VertexID)
-#define _GET_GL_INSTANCE_ID(InstId)_TypeConvertStore(InstId, gl_InstanceID)
+#ifdef VULKAN
+#   define _GET_GL_VERTEX_ID(VertexId)_TypeConvertStore(VertexId, gl_VertexIndex)
+#   define _GET_GL_INSTANCE_ID(InstId)_TypeConvertStore(InstId, gl_InstanceIndex)
+#else
+#   define _GET_GL_VERTEX_ID(VertexId)_TypeConvertStore(VertexId, gl_VertexID)
+#   define _GET_GL_INSTANCE_ID(InstId)_TypeConvertStore(InstId, gl_InstanceID)
+#endif
 #define _SET_GL_POSITION(Pos)gl_Position=_ExpandVector(Pos)
 
 #endif
