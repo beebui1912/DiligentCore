@@ -25,6 +25,7 @@
  *  of the possibility of such damages.
  */
 
+#include <algorithm>
 #include <climits>
 #include <sstream>
 #include <array>
@@ -3521,12 +3522,262 @@ TEST(Common_AdvancedMath, TriangulatePolygon2D)
         };
 
         const auto Tris = Triangulator.Triangulate(Verts);
-        EXPECT_EQ(Triangulator.GetResult() & ~TRIANGULATE_POLYGON_RESULT_INVALID_EAR, TRIANGULATE_POLYGON_RESULT_OK);
+        EXPECT_EQ(Triangulator.GetResult(), TRIANGULATE_POLYGON_RESULT_OK);
 
         const std::vector<Uint32> RefTris = {1, 2, 3, 1, 3, 4, 0, 1, 4, 0, 4, 5, 10, 0, 5, 5, 6, 7, 5, 7, 8, 5, 8, 9, 5, 9, 10};
         EXPECT_EQ(Tris, RefTris);
     }
 }
+
+TEST(Common_AdvancedMath, TriangulateConvexPolygons)
+{
+    struct TestCase
+    {
+        const char*       Name;
+        std::vector<int2> Vertices;
+    };
+    const TestCase Cases[] = {
+        // Counterclockwise vertex numbering:
+        //
+        //    5-------4
+        //  .'         '.
+        //  0           3
+        //  '.         .'
+        //    1-------2
+        {"StrictlyConvex", {{0, 1}, {1, 0}, {3, 0}, {4, 1}, {3, 2}, {1, 2}}},
+
+        // Vertices 1 and 4 lie on straight boundary edges:
+        //
+        //  5---4-------3
+        //  |           |
+        //  0---1-------2
+        {"CollinearBoundaryVertices", {{0, 0}, {1, 0}, {3, 0}, {3, 2}, {1, 2}, {0, 2}}},
+    };
+    // Preserve the fan and final triangle order produced by clipping the first ear.
+    const std::vector<Uint32> ExpectedIndices = {5, 0, 1, 5, 1, 2, 5, 2, 3, 3, 4, 5};
+
+    Polygon2DTriangulator<Uint32> Triangulator;
+    for (const TestCase& Case : Cases)
+    {
+        SCOPED_TRACE(Case.Name);
+        for (bool Clockwise : {false, true})
+        {
+            SCOPED_TRACE(Clockwise);
+            std::vector<int2> Vertices = Case.Vertices;
+            if (Clockwise)
+            {
+                std::reverse(Vertices.begin(), Vertices.end());
+            }
+            for (size_t StartVertex = 0; StartVertex < Vertices.size(); ++StartVertex)
+            {
+                SCOPED_TRACE(StartVertex);
+                const std::vector<Uint32>& Indices = Triangulator.Triangulate(Vertices);
+                EXPECT_EQ(Triangulator.GetResult(), TRIANGULATE_POLYGON_RESULT_OK);
+                EXPECT_EQ(Indices, ExpectedIndices);
+                std::rotate(Vertices.begin(), Vertices.begin() + 1, Vertices.end());
+            }
+        }
+    }
+
+    // An entirely collinear polygon must still be rejected, clearing the previous fan.
+    const std::vector<int2> CollinearVertices = {{0, 0}, {1, 0}, {2, 0}, {3, 0}};
+    EXPECT_TRUE(Triangulator.Triangulate(CollinearVertices).empty());
+    EXPECT_EQ(Triangulator.GetResult(), TRIANGULATE_POLYGON_RESULT_VERTS_COLLINEAR);
+}
+
+TEST(Common_AdvancedMath, TriangulatePolygonWithTooFewVertices)
+{
+    const std::vector<int2>       Triangle        = {{0, 0}, {1, 0}, {0, 1}};
+    const std::vector<Uint32>     ExpectedIndices = {0, 1, 2};
+    Polygon2DTriangulator<Uint32> Triangulator;
+    for (size_t VertexCount = 0; VertexCount < 3; ++VertexCount)
+    {
+        SCOPED_TRACE(VertexCount);
+        EXPECT_EQ(Triangulator.Triangulate(Triangle), ExpectedIndices);
+        EXPECT_EQ(Triangulator.GetResult(), TRIANGULATE_POLYGON_RESULT_OK);
+
+        // Reject each short input and clear the triangles from the preceding call.
+        std::vector<int2> Vertices = Triangle;
+        Vertices.resize(VertexCount);
+        EXPECT_TRUE(Triangulator.Triangulate(Vertices).empty());
+        EXPECT_EQ(Triangulator.GetResult(), TRIANGULATE_POLYGON_RESULT_TOO_FEW_VERTS);
+    }
+
+    // A subsequent valid input must reset the error status.
+    EXPECT_EQ(Triangulator.Triangulate(Triangle), ExpectedIndices);
+    EXPECT_EQ(Triangulator.GetResult(), TRIANGULATE_POLYGON_RESULT_OK);
+}
+
+TEST(Common_AdvancedMath, TriangulatePolygonIndexTypeLimits)
+{
+    // A convex polygon along a parabola uses every Uint8 index, including 255.
+    constexpr int     MaxVertexCount = 256;
+    std::vector<int2> Vertices;
+    for (int i = 0; i < MaxVertexCount; ++i)
+    {
+        Vertices.emplace_back(i, i * i);
+    }
+
+    Polygon2DTriangulator<Uint8> Triangulator;
+    const std::vector<Uint8>&    Indices = Triangulator.Triangulate(Vertices);
+    EXPECT_EQ(Triangulator.GetResult(), TRIANGULATE_POLYGON_RESULT_OK);
+    ASSERT_EQ(Indices.size(), size_t{3} * (MaxVertexCount - 2));
+    EXPECT_NE(std::find(Indices.begin(), Indices.end(), Uint8{255}), Indices.end());
+
+    // The next vertex would require index 256; reject it and clear the previous output.
+    Vertices.emplace_back(MaxVertexCount, MaxVertexCount * MaxVertexCount);
+    EXPECT_TRUE(Triangulator.Triangulate(Vertices).empty());
+    EXPECT_EQ(Triangulator.GetResult(), TRIANGULATE_POLYGON_RESULT_TOO_MANY_VERTS);
+}
+
+TEST(Common_AdvancedMath, TriangulateConcavePolygonWithConvexVertexInsideEarCandidate)
+{
+    // Counterclockwise vertex numbering:
+    //
+    //  0
+    //  |'.
+    //  |  '.
+    //  |   4---3
+    //  |        '.
+    //  1-----------2
+    //
+    // Candidate triangle (0, 1, 2) contains convex vertex 3 and reflex vertex 4.
+    // Vertex 4 disqualifies the ear candidate; vertex 3 does not indicate an
+    // invalid polygon and must not cause a validation error.
+    const std::vector<int2>   Vertices        = {{0, 4}, {0, 0}, {4, 0}, {2, 1}, {1, 1}};
+    const std::vector<Uint32> ExpectedIndices = {4, 0, 1, 4, 1, 2, 2, 3, 4};
+
+    Polygon2DTriangulator<Uint32> Triangulator;
+    const std::vector<Uint32>&    Indices = Triangulator.Triangulate(Vertices);
+    EXPECT_EQ(Triangulator.GetResult(), TRIANGULATE_POLYGON_RESULT_OK);
+    EXPECT_EQ(Indices, ExpectedIndices);
+}
+
+TEST(Common_AdvancedMath, TriangulateConcavePolygonWithCollinearVertices)
+{
+    // Counterclockwise vertex numbering:
+    //
+    //  4.     .2
+    //  | '. .' |
+    //  |   3   |
+    //  |       |
+    //  5---0---1
+    //
+    // Reflex vertex 3 keeps this on the ear-clipping path. Collinear vertices
+    // (5, 0, 1) form the first ear in the counterclockwise case.
+    struct TestCase
+    {
+        const char*         Name;
+        std::vector<int2>   Vertices;
+        std::vector<Uint32> ExpectedIndices;
+    };
+    const TestCase Cases[] = {
+        {"Counterclockwise",
+         {{1, 0}, {2, 0}, {2, 2}, {1, 1}, {0, 2}, {0, 0}},
+         {5, 0, 1, 1, 2, 3, 5, 1, 3, 3, 4, 5}},
+        {"Clockwise",
+         {{0, 0}, {0, 2}, {1, 1}, {2, 2}, {2, 0}, {1, 0}},
+         {5, 0, 1, 5, 1, 2, 5, 2, 3, 3, 4, 5}},
+    };
+    Polygon2DTriangulator<Uint32> Triangulator;
+    for (const TestCase& Case : Cases)
+    {
+        SCOPED_TRACE(Case.Name);
+        EXPECT_EQ(Triangulator.Triangulate(Case.Vertices), Case.ExpectedIndices);
+        EXPECT_EQ(Triangulator.GetResult(), TRIANGULATE_POLYGON_RESULT_OK);
+    }
+}
+
+TEST(Common_AdvancedMath, TriangulateConcavePolygonWithVertexOnEarDiagonal)
+{
+    // Counterclockwise vertex numbering:
+    //
+    //  5---4
+    //  |   |
+    //  |   3---2
+    //  |       |
+    //  0-------1
+    //
+    // Vertex 3 lies on diagonal 5--1, so (5, 0, 1) must not be clipped as
+    // the first ear. The reference triangles explicitly partition the L.
+    struct TestCase
+    {
+        const char*          Name;
+        std::vector<double2> Vertices;
+        std::vector<Uint32>  ExpectedIndices;
+    };
+    const TestCase Cases[] = {
+        {"Counterclockwise",
+         {{0, 0}, {2, 0}, {2, 1}, {1, 1}, {1, 2}, {0, 2}},
+         {0, 1, 2, 0, 2, 3, 5, 0, 3, 3, 4, 5}},
+        {"Clockwise",
+         {{0, 2}, {1, 2}, {1, 1}, {2, 1}, {2, 0}, {0, 0}},
+         {5, 0, 1, 5, 1, 2, 5, 2, 3, 3, 4, 5}},
+    };
+
+    struct ProjectionCase
+    {
+        const char* Name;
+        double      XCoefficient;
+        double      YCoefficient;
+    };
+    const ProjectionCase Projections[] = {
+        {"AxisAligned", 0, 0},
+        {"Oblique", 1, 3},
+        {"TwoTiedNormalComponents", 0, 1},
+        {"ThreeTiedNormalComponents", 1, 1},
+    };
+
+    Polygon2DTriangulator<Uint32>         Triangulator2D;
+    Polygon3DTriangulator<Uint32, double> Triangulator3D;
+    Polygon3DTriangulator<Uint32, float>  Triangulator3DFloat;
+    for (const TestCase& Case : Cases)
+    {
+        SCOPED_TRACE(Case.Name);
+        const std::vector<Uint32>& Indices2D = Triangulator2D.Triangulate(Case.Vertices);
+        EXPECT_EQ(Triangulator2D.GetResult(), TRIANGULATE_POLYGON_RESULT_OK);
+        EXPECT_EQ(Indices2D, Case.ExpectedIndices);
+
+        for (const ProjectionCase& Projection : Projections)
+        {
+            SCOPED_TRACE(Projection.Name);
+            // The oblique case lies on z = x + 3*y - 2. An orthonormal projection
+            // can round vertex 3 off diagonal 5--1 and permit an overlapping ear.
+            // Cyclic axis permutations exercise every projection axis and ties
+            // between the largest absolute normal components.
+            for (size_t AxisPermutation = 0; AxisPermutation < 3; ++AxisPermutation)
+            {
+                SCOPED_TRACE(AxisPermutation);
+                std::vector<double3> Vertices3D;
+                std::vector<float3>  Vertices3DFloat;
+                for (const double2& Vertex : Case.Vertices)
+                {
+                    const double3 Vertex3D{Vertex.x + 2, Vertex.y,
+                                           Projection.XCoefficient * Vertex.x + Projection.YCoefficient * Vertex.y};
+                    double3       PermutedVertex;
+                    switch (AxisPermutation)
+                    {
+                        case 0: PermutedVertex = Vertex3D; break;
+                        case 1: PermutedVertex = double3{Vertex3D.y, Vertex3D.z, Vertex3D.x}; break;
+                        case 2: PermutedVertex = double3{Vertex3D.z, Vertex3D.x, Vertex3D.y}; break;
+                    }
+                    Vertices3D.push_back(PermutedVertex);
+                    Vertices3DFloat.emplace_back(static_cast<float>(PermutedVertex.x),
+                                                 static_cast<float>(PermutedVertex.y),
+                                                 static_cast<float>(PermutedVertex.z));
+                }
+                const std::vector<Uint32>& Indices3D = Triangulator3D.Triangulate(Vertices3D);
+                EXPECT_EQ(Triangulator3D.GetResult(), TRIANGULATE_POLYGON_RESULT_OK);
+                EXPECT_EQ(Indices3D, Case.ExpectedIndices);
+
+                const std::vector<Uint32>& Indices3DFloat = Triangulator3DFloat.Triangulate(Vertices3DFloat);
+                EXPECT_EQ(Triangulator3DFloat.GetResult(), TRIANGULATE_POLYGON_RESULT_OK);
+                EXPECT_EQ(Indices3DFloat, Case.ExpectedIndices);
+            }
+        }
+    }
+}
+
 
 TEST(Common_AdvancedMath, TriangulatePolygon3D)
 {
@@ -3571,15 +3822,23 @@ TEST(Common_AdvancedMath, TriangulatePolygon3D)
     }
 
     {
+        // Clockwise notched rectangle in the plane z = 1:
+        //
+        //  2---3---4---5
+        //  |           |
+        //  |           |
+        //  |   0       |
+        //  | .' '.     |
+        //  1'     '7---6
         const std::vector<double3> Verts = {
-            {0.0866542682, 0.191178054, 0.119771279},
-            {0.0846562684, 0.192071155, 0.119771279},
-            {0.0846562684, 0.192071155, 0.120928936},
-            {0.104519472, 0.182026610, 0.120928936},
-            {0.121640369, 0.171060309, 0.120928936},
-            {0.129021034, 0.165564433, 0.120928936},
-            {0.129021034, 0.165564433, 0.119771279},
-            {0.104520433, 0.182026073, 0.119771279},
+            {2, 1, 1},
+            {0, 0, 1},
+            {0, 4, 1},
+            {2, 4, 1},
+            {4, 4, 1},
+            {6, 4, 1},
+            {6, 0, 1},
+            {4, 0, 1},
         };
         Polygon3DTriangulator<Uint32, double> Triangulator;
         const std::vector<Uint32>             RefTris = {0, 1, 2, 7, 0, 2, 7, 2, 3, 7, 3, 4, 7, 4, 5, 5, 6, 7};
