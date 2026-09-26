@@ -66,7 +66,9 @@ struct DWParam
 class CommandContext
 {
 public:
-    explicit CommandContext(class CommandListManager& CmdListManager);
+    // NodeMask selects the GPU node this context's command list targets in Linked Multi-GPU mode.
+    // Default (1) is node 0, matching the legacy single-GPU behavior.
+    explicit CommandContext(class CommandListManager& CmdListManager, UINT NodeMask = 1);
 
     // clang-format off
     CommandContext             (const CommandContext&)  = delete;
@@ -80,7 +82,7 @@ public:
     // Submit the command buffer and reset it.  This is encouraged to keep the GPU busy and reduce latency.
     // Taking too long to build command lists and submit them can idle the GPU.
     ID3D12GraphicsCommandList* Close(CComPtr<ID3D12CommandAllocator>& pAllocator);
-    void                       Reset(CommandListManager& CmdListManager);
+    void                       Reset(CommandListManager& CmdListManager, UINT NodeMask = 1);
 
     class GraphicsContext&  AsGraphicsContext();
     class GraphicsContext1& AsGraphicsContext1();
@@ -270,6 +272,9 @@ protected:
     D3D12_PRIMITIVE_TOPOLOGY m_PrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 
     Uint32 m_MaxInterfaceVer = 0;
+
+    // GPU node mask this context's command list is created for (Linked Multi-GPU). 1 = node 0 (default).
+    UINT m_NodeMask = 1;
 };
 
 class ComputeContext : public CommandContext

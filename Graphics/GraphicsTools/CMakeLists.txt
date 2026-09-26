@@ -77,6 +77,10 @@ endif()
 if(DILIGENT_USE_OPENXR)
     list(APPEND SOURCE src/OpenXRUtilities.cpp)
     list(APPEND INTERFACE interface/OpenXRUtilities.h)
+    # Stereo multi-GPU compositor for OpenXR. Backend-agnostic, but only meaningful for XR, so it is
+    # compiled together with the rest of the OpenXR utilities.
+    list(APPEND SOURCE src/XRStereoMGPUCompositor.cpp)
+    list(APPEND INTERFACE interface/XRStereoMGPUCompositor.hpp)
 endif()
 
 set(DEPENDENCIES)

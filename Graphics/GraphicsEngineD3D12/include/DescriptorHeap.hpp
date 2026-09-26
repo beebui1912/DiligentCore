@@ -110,7 +110,8 @@ public:
         m_pDescriptorHeap     {std::move(Allocation.m_pDescriptorHeap)    },
         m_NumHandles          {std::move(Allocation.m_NumHandles)         },
         m_AllocationManagerId {std::move(Allocation.m_AllocationManagerId)},
-        m_DescriptorSize      {std::move(Allocation.m_DescriptorSize)     }
+        m_DescriptorSize      {std::move(Allocation.m_DescriptorSize)     },
+        m_MirrorAllocations   {std::move(Allocation.m_MirrorAllocations)  }
     // clang-format on
     {
         Allocation.Reset();
@@ -126,6 +127,7 @@ public:
         m_AllocationManagerId = std::move(Allocation.m_AllocationManagerId);
         m_pDescriptorHeap     = std::move(Allocation.m_pDescriptorHeap);
         m_DescriptorSize      = std::move(Allocation.m_DescriptorSize);
+        m_MirrorAllocations   = std::move(Allocation.m_MirrorAllocations);
 
         Allocation.Reset();
 
@@ -134,6 +136,9 @@ public:
 
     void Reset()
     {
+        // Release linked multi-GPU mirror allocations first (each frees itself through its allocator).
+        m_MirrorAllocations.clear();
+
         m_FirstCpuHandle.ptr  = 0;
         m_FirstGpuHandle.ptr  = 0;
         m_pAllocator          = nullptr;
@@ -199,6 +204,46 @@ public:
     ID3D12DescriptorHeap* GetDescriptorHeap() const { return m_pDescriptorHeap; }
 
 
+    // ----- Linked multi-GPU (LDA) support -----------------------------------------------------
+    // In linked multi-GPU mode, shader-visible descriptor heaps are per-node and a command list
+    // recorded for node N must bind node N's heap. Since a single SRB may be used on several nodes,
+    // the static/mutable allocation created on node 0 keeps a "mirror" allocation on every other
+    // node's heap. Descriptor writes are replicated to each mirror (see ShaderResourceCacheD3D12),
+    // and the commit path selects the executing context's node via GetNode*() below.
+    //
+    // For single-GPU (the default), m_MirrorAllocations is empty and every accessor resolves to
+    // node 0 (this), so the behavior is byte-identical to the non-mGPU path.
+
+    // Attaches a mirror allocation for the next node (node 1, then node 2, ...).
+    void AddNodeMirror(DescriptorHeapAllocation&& Mirror)
+    {
+        m_MirrorAllocations.emplace_back(std::move(Mirror));
+    }
+
+    // Number of mirror allocations, i.e. (number of linked nodes - 1). Zero for single-GPU.
+    Uint32 GetNodeMirrorCount() const { return static_cast<Uint32>(m_MirrorAllocations.size()); }
+
+    // Returns the allocation that backs the given node. Node 0 is this allocation; nodes without a
+    // mirror (single-GPU, or node index out of range) fall back to node 0.
+    const DescriptorHeapAllocation& GetNodeAllocation(Uint32 Node) const
+    {
+        if (Node == 0 || Node > m_MirrorAllocations.size())
+            return *this;
+        return m_MirrorAllocations[Node - 1];
+    }
+
+    ID3D12DescriptorHeap*       GetNodeDescriptorHeap(Uint32 Node) const { return GetNodeAllocation(Node).GetDescriptorHeap(); }
+    D3D12_CPU_DESCRIPTOR_HANDLE GetNodeCpuHandle(Uint32 Node, Uint32 Offset = 0) const { return GetNodeAllocation(Node).GetCpuHandle(Offset); }
+    D3D12_GPU_DESCRIPTOR_HANDLE GetNodeGpuHandle(Uint32 Node, Uint32 Offset = 0) const { return GetNodeAllocation(Node).GetGpuHandle(Offset); }
+
+    template <typename HandleType>
+    HandleType GetNodeHandle(Uint32 Node, Uint32 Offset = 0) const
+    {
+        return GetNodeAllocation(Node).GetHandle<HandleType>(Offset);
+    }
+    // ------------------------------------------------------------------------------------------
+
+
     // clang-format off
     size_t GetNumHandles()          const { return m_NumHandles;              }
     bool   IsNull()                 const { return m_FirstCpuHandle.ptr == 0; }
@@ -236,6 +281,10 @@ private:
 
     // Descriptor size
     Uint16 m_DescriptorSize = 0;
+
+    // Linked multi-GPU mirror allocations for nodes 1..N-1 (node 0 is this allocation).
+    // Empty for single-GPU, so there is no overhead in the common case.
+    std::vector<DescriptorHeapAllocation> m_MirrorAllocations;
 };
 
 

@@ -92,6 +92,7 @@ namespace VulkanUtilities
 #    define vkCmdTraceRaysKHR                            DILIGENT_CMD_VK(vkCmdTraceRaysKHR)
 #    define vkCmdTraceRaysIndirectKHR                    DILIGENT_CMD_VK(vkCmdTraceRaysIndirectKHR)
 #    define vkCmdSetFragmentShadingRateKHR               DILIGENT_CMD_VK(vkCmdSetFragmentShadingRateKHR)
+#    define vkCmdSetDeviceMaskKHR                        DILIGENT_CMD_VK(vkCmdSetDeviceMaskKHR)
 // VK_EXT_debug_utils command functions (vkCmdBeginDebugUtilsLabelEXT, vkCmdEndDebugUtilsLabelEXT,
 // vkCmdInsertDebugUtilsLabelEXT) come from an INSTANCE extension and are NOT part of VolkDeviceTable,
 // so they are left as global pointers (loaded by volkLoadInstance), which dispatch for any device.
@@ -335,6 +336,19 @@ public:
 
         FlushBarriers();
         vkCmdDispatch(m_VkCmdBuffer, GroupCountX, GroupCountY, GroupCountZ);
+    }
+
+    // Linked multi-GPU (VK_KHR_device_group): sets the device mask that scopes all subsequent
+    // commands (draws, dispatches, acceleration-structure builds, ray tracing, copies) to the
+    // physical device(s) selected by DeviceMask. This must be recorded before any other command,
+    // i.e. right after the command buffer begins. Only meaningful when a device group is used;
+    // for single-GPU the caller must not invoke this (DeviceMask == 0 is treated as a no-op).
+    __forceinline void SetDeviceMask(uint32_t DeviceMask)
+    {
+        VERIFY_EXPR(m_VkCmdBuffer != VK_NULL_HANDLE);
+        if (DeviceMask == 0)
+            return;
+        vkCmdSetDeviceMaskKHR(m_VkCmdBuffer, DeviceMask);
     }
 
     __forceinline void DispatchIndirect(VkBuffer Buffer, VkDeviceSize Offset)
@@ -991,6 +1005,7 @@ private:
 #    undef vkCmdTraceRaysKHR
 #    undef vkCmdTraceRaysIndirectKHR
 #    undef vkCmdSetFragmentShadingRateKHR
+#    undef vkCmdSetDeviceMaskKHR
 #    undef DILIGENT_CMD_VK
 #endif
 

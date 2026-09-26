@@ -314,6 +314,14 @@ public:
         return AllocationIdx >= 0 ? m_DescriptorAllocations[AllocationIdx].GetDescriptorHeap() : nullptr;
     }
 
+    // Linked multi-GPU variant: returns the shader-visible heap that backs the given node.
+    // For single-GPU (Node == 0 or no mirror), this resolves to the same heap as the overload above.
+    ID3D12DescriptorHeap* GetDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE HeapType, ROOT_PARAMETER_GROUP Group, Uint32 Node) const
+    {
+        Int8 AllocationIdx = m_AllocationIndex[HeapType][Group];
+        return AllocationIdx >= 0 ? m_DescriptorAllocations[AllocationIdx].GetNodeDescriptorHeap(Node) : nullptr;
+    }
+
     // Returns CPU/GPU descriptor handle of a descriptor heap allocation
     template <typename HandleType>
     HandleType GetDescriptorTableHandle(
@@ -331,6 +339,28 @@ public:
         VERIFY_EXPR(AllocationIdx < m_NumDescriptorAllocations);
 
         return m_DescriptorAllocations[AllocationIdx].GetHandle<HandleType>(RootParam.GetStartOffset() + OffsetFromTableStart);
+    }
+
+    // Linked multi-GPU variant: returns the CPU/GPU descriptor handle on the heap that backs the
+    // given node. For single-GPU (Node == 0 or no mirror) this resolves to the same handle as the
+    // overload above.
+    template <typename HandleType>
+    HandleType GetDescriptorTableHandle(
+        D3D12_DESCRIPTOR_HEAP_TYPE HeapType,
+        ROOT_PARAMETER_GROUP       Group,
+        Uint32                     RootParamInd,
+        Uint32                     OffsetFromTableStart,
+        Uint32                     Node) const
+    {
+        const RootTable& RootParam = GetRootTable(RootParamInd);
+        VERIFY(RootParam.GetStartOffset() != InvalidDescriptorOffset, "This root parameter is not assigned a valid descriptor table offset");
+        VERIFY(OffsetFromTableStart < RootParam.GetSize(), "Offset is out of range");
+
+        const Int8 AllocationIdx = m_AllocationIndex[HeapType][Group];
+        VERIFY(AllocationIdx >= 0, "Descriptor space is not assigned to this table");
+        VERIFY_EXPR(AllocationIdx < m_NumDescriptorAllocations);
+
+        return m_DescriptorAllocations[AllocationIdx].GetNodeHandle<HandleType>(Node, RootParam.GetStartOffset() + OffsetFromTableStart);
     }
 
     const DescriptorHeapAllocation& GetDescriptorAllocation(D3D12_DESCRIPTOR_HEAP_TYPE HeapType,

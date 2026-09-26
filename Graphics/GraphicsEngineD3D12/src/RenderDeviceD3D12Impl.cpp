@@ -493,6 +493,18 @@ void RenderDeviceD3D12Impl::ReleaseStaleResources(bool ForceRelease)
 RenderDeviceD3D12Impl::PooledCommandContext RenderDeviceD3D12Impl::AllocateCommandContext(SoftwareQueueIndex CommandQueueId, const Char* ID)
 {
     CommandListManager& CmdListMngr = GetCmdListManager(CommandQueueId);
+
+    // Linked Multi-GPU: route the command list to the GPU node its command queue targets. The queue's
+    // node mask was set at creation (EngineFactoryD3D12). For single-GPU (m_NodeCount == 1) we keep the
+    // default node mask 1 without querying the queue, so behavior is identical to the legacy path.
+    UINT NodeMask = 1;
+    if (m_NodeCount > 1)
+    {
+        NodeMask = GetCommandQueue(CommandQueueId).GetD3D12CommandQueueDesc().NodeMask;
+        if (NodeMask == 0)
+            NodeMask = 1;
+    }
+
     {
         std::lock_guard<std::mutex> Guard{m_ContextPoolMutex};
 
@@ -501,7 +513,7 @@ RenderDeviceD3D12Impl::PooledCommandContext RenderDeviceD3D12Impl::AllocateComma
         {
             PooledCommandContext Ctx = std::move(pool_it->second);
             m_ContextPool.erase(pool_it);
-            Ctx->Reset(CmdListMngr);
+            Ctx->Reset(CmdListMngr, NodeMask);
             Ctx->SetID(ID);
 #ifdef DILIGENT_DEVELOPMENT
             m_AllocatedCtxCounter.fetch_add(1);
@@ -512,7 +524,7 @@ RenderDeviceD3D12Impl::PooledCommandContext RenderDeviceD3D12Impl::AllocateComma
 
     IMemoryAllocator& CmdCtxAllocator = GetRawAllocator();
     CommandContext*   pRawMem         = ALLOCATE(CmdCtxAllocator, "CommandContext instance", CommandContext, 1);
-    CommandContext*   pCtx            = new (pRawMem) CommandContext(CmdListMngr);
+    CommandContext*   pCtx            = new (pRawMem) CommandContext(CmdListMngr, NodeMask);
     pCtx->SetID(ID);
 #ifdef DILIGENT_DEVELOPMENT
     m_AllocatedCtxCounter.fetch_add(1);
@@ -724,8 +736,29 @@ DescriptorHeapAllocation RenderDeviceD3D12Impl::AllocateGPUDescriptors(D3D12_DES
 {
     VERIFY(Type >= D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && Type <= D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, "Invalid heap type");
     // Static/mutable descriptors are allocated from node 0's heap.
-    // In linked mode, node 0's shader-visible heap is used for resources that are shared.
-    return m_GPUDescriptorHeaps[0][Type]->Allocate(Count);
+    DescriptorHeapAllocation Allocation = m_GPUDescriptorHeaps[0][Type]->Allocate(Count);
+
+    // Linked multi-GPU: a shader-visible descriptor heap belongs to exactly one node, and a command
+    // list recorded for node N must bind node N's heap. Since an SRB may be used on several nodes,
+    // mirror the allocation onto every other node's heap so the same descriptors are reachable from
+    // each node. The commit path (PipelineResourceSignatureD3D12Impl) then binds the node that
+    // matches the executing context. For single-GPU (m_NodeCount == 1) this loop does not run and
+    // the returned allocation is exactly node 0's, identical to the legacy path.
+    if (m_NodeCount > 1 && !Allocation.IsNull())
+    {
+        for (Uint32 node = 1; node < m_NodeCount && node < DILIGENT_MAX_LINKED_GPU_NODES; ++node)
+        {
+            if (!m_GPUDescriptorHeaps[node][Type])
+                continue;
+            DescriptorHeapAllocation Mirror = m_GPUDescriptorHeaps[node][Type]->Allocate(Count);
+            DEV_CHECK_ERR(!Mirror.IsNull(),
+                          "Failed to allocate ", Count, " GPU-visible descriptor(s) on linked GPU node ", node,
+                          ". Consider increasing GPUDescriptorHeapSize[", static_cast<Uint32>(Type), "] in EngineD3D12CreateInfo.");
+            Allocation.AddNodeMirror(std::move(Mirror));
+        }
+    }
+
+    return Allocation;
 }
 
 void RenderDeviceD3D12Impl::CreateRootSignature(const RefCntAutoPtr<PipelineResourceSignatureD3D12Impl>* ppSignatures, Uint32 SignatureCount, size_t Hash, RootSignatureD3D12** ppRootSig)

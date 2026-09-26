@@ -69,6 +69,18 @@ struct TopLevelASDesc DILIGENT_DERIVE(DeviceObjectAttribs)
     ///             will actually be used. Do not set unnecessary bits as this will result in extra overhead.
     Uint64                    ImmediateContextMask    DEFAULT_INITIALIZER(1);
 
+    /// Bitmask identifying the GPU node where the acceleration structure memory will be allocated (0 = default node 0).
+
+    /// In Linked Multi-GPU mode, this selects the physical GPU node that owns the TLAS backing memory.
+    /// A value of 0 is resolved to node 0 (bit 0), which matches the legacy single-GPU behavior.
+    Uint32                    CreationNodeMask        DEFAULT_INITIALIZER(0);
+
+    /// Bitmask identifying GPU nodes that can access this acceleration structure (0 = fall back to CreationNodeMask).
+
+    /// In Linked Multi-GPU mode, set additional bits so that secondary nodes can read the TLAS built by another node
+    /// over the peer memory link. A value of 0 is resolved to CreationNodeMask, matching legacy single-GPU behavior.
+    Uint32                    VisibleNodeMask         DEFAULT_INITIALIZER(0);
+
 #if DILIGENT_CPP_INTERFACE
     constexpr TopLevelASDesc() noexcept {}
 #endif

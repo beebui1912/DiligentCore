@@ -107,6 +107,13 @@ DeviceContextVkImpl::DeviceContextVkImpl(IReferenceCounters*      pRefCounters,
     m_CommandBuffer.SetDeviceTable(&m_pDevice->GetLogicalDevice().GetVkTable());
 #endif
 
+    // Linked multi-GPU (VK_KHR_device_group): when the device spans multiple linked nodes, scope all
+    // command buffers recorded by this context to the node it targets via vkCmdSetDeviceMaskKHR.
+    // Only immediate contexts carry a node index; deferred contexts inherit the mask at execution.
+    // Left at 0 (no-op) for single-GPU and unlinked mode so the recording path is unchanged.
+    if (m_pDevice->GetAdapterInfo().NodeCount > 1)
+        m_CmdBufferDeviceMask = 1u << m_Desc.NodeIndex;
+
     if (!IsDeferred())
     {
         PrepareCommandPool(GetCommandQueueId());

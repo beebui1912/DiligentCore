@@ -34,7 +34,6 @@ namespace Diligent
 
 CommandListManager::CommandListManager(RenderDeviceD3D12Impl& DeviceD3D12Impl, D3D12_COMMAND_LIST_TYPE ListType) :
     // clang-format off
-    m_FreeAllocators (STD_ALLOCATOR_RAW_MEM(CComPtr<ID3D12CommandAllocator>, GetRawAllocator(), "Allocator for vector<CComPtr<ID3D12CommandAllocator>>")),
     m_DeviceD3D12Impl{DeviceD3D12Impl},
     m_CmdListType    {ListType}
 // clang-format on
@@ -44,12 +43,16 @@ CommandListManager::CommandListManager(RenderDeviceD3D12Impl& DeviceD3D12Impl, D
 CommandListManager::~CommandListManager()
 {
     DEV_CHECK_ERR(m_AllocatorCounter == 0, m_AllocatorCounter, " allocator(s) have not been returned to the manager. This will cause a crash if these allocators are referenced by release queues and later returned via FreeAllocator()");
-    LOG_INFO_MESSAGE("Command list manager: created ", m_FreeAllocators.size(), " allocators");
+    LOG_INFO_MESSAGE("Command list manager: created ", m_AllocatorNodeMask.size(), " allocators");
 }
 
-void CommandListManager::CreateNewCommandList(ID3D12GraphicsCommandList** List, ID3D12CommandAllocator** Allocator, Uint32& IfaceVersion)
+void CommandListManager::CreateNewCommandList(ID3D12GraphicsCommandList** List, ID3D12CommandAllocator** Allocator, Uint32& IfaceVersion, UINT NodeMask)
 {
-    RequestAllocator(Allocator);
+    // NodeMask of 0 is treated as node 0 (D3D12 uses a 1-based bit mask for command lists).
+    if (NodeMask == 0)
+        NodeMask = 1;
+
+    RequestAllocator(Allocator, NodeMask);
     ID3D12Device* pd3d12Device = m_DeviceD3D12Impl.GetD3D12Device();
 
     const IID CmdListIIDs[] =
@@ -68,7 +71,7 @@ void CommandListManager::CreateNewCommandList(ID3D12GraphicsCommandList** List, 
     HRESULT hr = E_FAIL;
     for (Uint32 i = 0; i < _countof(CmdListIIDs); ++i)
     {
-        hr = pd3d12Device->CreateCommandList(1, m_CmdListType, *Allocator, nullptr, CmdListIIDs[i], reinterpret_cast<void**>(List));
+        hr = pd3d12Device->CreateCommandList(NodeMask, m_CmdListType, *Allocator, nullptr, CmdListIIDs[i], reinterpret_cast<void**>(List));
         if (SUCCEEDED(hr))
         {
             IfaceVersion = _countof(CmdListIIDs) - 1 - i;
@@ -81,19 +84,25 @@ void CommandListManager::CreateNewCommandList(ID3D12GraphicsCommandList** List, 
 }
 
 
-void CommandListManager::RequestAllocator(ID3D12CommandAllocator** ppAllocator)
+void CommandListManager::RequestAllocator(ID3D12CommandAllocator** ppAllocator, UINT NodeMask)
 {
     std::lock_guard<std::mutex> LockGuard{m_AllocatorMutex};
 
     VERIFY((*ppAllocator) == nullptr, "Allocator pointer is not null");
     (*ppAllocator) = nullptr;
 
-    if (!m_FreeAllocators.empty())
+    if (NodeMask == 0)
+        NodeMask = 1;
+
+    // Reuse an allocator from this node's pool if one is available. Allocators are never shared across
+    // nodes because a D3D12 command allocator is bound to the node of the first list that records it.
+    std::vector<CComPtr<ID3D12CommandAllocator>>& NodePool = m_FreeAllocators[NodeMask];
+    if (!NodePool.empty())
     {
-        *ppAllocator = m_FreeAllocators.back().Detach();
+        *ppAllocator = NodePool.back().Detach();
         HRESULT hr   = (*ppAllocator)->Reset();
         DEV_CHECK_ERR(SUCCEEDED(hr), "Failed to reset command allocator");
-        m_FreeAllocators.pop_back();
+        NodePool.pop_back();
     }
 
     // If no allocators were ready to be reused, create a new one
@@ -106,6 +115,8 @@ void CommandListManager::RequestAllocator(ID3D12CommandAllocator** ppAllocator)
         swprintf(AllocatorName, _countof(AllocatorName), L"Cmd list allocator %ld", m_NumAllocators.fetch_add(1));
         (*ppAllocator)->SetName(AllocatorName);
     }
+    // Remember which node this allocator belongs to so FreeAllocator() returns it to the right pool.
+    m_AllocatorNodeMask[*ppAllocator] = NodeMask;
 #ifdef DILIGENT_DEVELOPMENT
     m_AllocatorCounter.fetch_add(1);
 #endif
@@ -149,7 +160,12 @@ void CommandListManager::ReleaseAllocator(CComPtr<ID3D12CommandAllocator>&& Allo
 void CommandListManager::FreeAllocator(CComPtr<ID3D12CommandAllocator>&& Allocator)
 {
     std::lock_guard<std::mutex> LockGuard(m_AllocatorMutex);
-    m_FreeAllocators.emplace_back(std::move(Allocator));
+    // Return the allocator to the pool of the node it was created for (node mask 1 by default).
+    UINT NodeMask = 1;
+    auto it       = m_AllocatorNodeMask.find(Allocator);
+    if (it != m_AllocatorNodeMask.end())
+        NodeMask = it->second;
+    m_FreeAllocators[NodeMask].emplace_back(std::move(Allocator));
 #ifdef DILIGENT_DEVELOPMENT
     m_AllocatorCounter.fetch_add(-1);
 #endif

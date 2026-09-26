@@ -54,7 +54,10 @@ public:
 
     ~CommandBufferPool();
 
-    VkCommandBuffer GetCommandBuffer(const char* DebugName = "");
+    // DeviceMask: for linked multi-GPU (VK_KHR_device_group), the initial device mask stamped on the
+    // command buffer via VkDeviceGroupCommandBufferBeginInfo, scoping its commands to the given GPU
+    // node(s). 0 (the default) chains nothing, so single-GPU/unlinked recording is unchanged.
+    VkCommandBuffer GetCommandBuffer(const char* DebugName = "", uint32_t DeviceMask = 0);
     // The GPU must have finished with the command buffer being returned to the pool
     void RecycleCommandBuffer(VkCommandBuffer&& CmdBuffer);
 
