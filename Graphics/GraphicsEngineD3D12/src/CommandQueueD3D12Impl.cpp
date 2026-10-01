@@ -105,7 +105,14 @@ Uint64 CommandQueueD3D12Impl::WaitForIdle()
 Uint64 CommandQueueD3D12Impl::GetCompletedFenceValue()
 {
     Uint64 CompletedFenceValue = m_d3d12Fence->GetCompletedValue();
-    VERIFY(CompletedFenceValue != UINT64_MAX, "If the device has been removed, the return value will be UINT64_MAX");
+    if (CompletedFenceValue == UINT64_MAX)
+    {
+        // GetCompletedValue() returns UINT64_MAX once the device has been removed (TDR, driver reset,
+        // ID3D12Device5::RemoveDevice). This is a runtime condition, not a programming error: treat
+        // all submitted work as complete so that waits return and objects can be released, which an
+        // application needs in order to recreate the device.
+        LOG_WARNING_MESSAGE_ONCE("D3D12 device has been removed; all submitted command lists are treated as completed");
+    }
 
     Uint64 CurrValue = m_LastCompletedFenceValue.load();
     while (!m_LastCompletedFenceValue.compare_exchange_weak(CurrValue, std::max(CurrValue, CompletedFenceValue)))
