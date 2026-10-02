@@ -393,8 +393,12 @@ TextureD3D12Impl::TextureD3D12Impl(IReferenceCounters*        pRefCounters,
 
         StaginHeapProps.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
         StaginHeapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-        StaginHeapProps.CreationNodeMask     = 1;
-        StaginHeapProps.VisibleNodeMask      = 1;
+        // Linked multi-GPU: like the other resources, honor the descriptor's node masks. When they are
+        // not set, CPU-accessible staging memory is made visible to every node so that any node's
+        // queue can copy to or from it. Single-node adapters keep node mask 1 (unchanged).
+        const Uint32 AdapterNodeMask         = pRenderDeviceD3D12->GetAdapterInfo().NodeMask;
+        StaginHeapProps.CreationNodeMask     = m_Desc.CreationNodeMask != 0 ? m_Desc.CreationNodeMask : 1;
+        StaginHeapProps.VisibleNodeMask      = m_Desc.VisibleNodeMask != 0 ? m_Desc.VisibleNodeMask : (AdapterNodeMask > 1 ? AdapterNodeMask : StaginHeapProps.CreationNodeMask);
 
         UINT64 stagingBufferSize = 0;
         Uint32 NumSubresources   = Uint32{d3d12TexDesc.MipLevels} * (d3d12TexDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : Uint32{d3d12TexDesc.DepthOrArraySize});

@@ -48,6 +48,11 @@ public:
         RefCntAutoPtr<ITexture> pPrimaryStagingUpload;
         RefCntAutoPtr<IFence>   pSecondaryFence;
         Uint64                  FenceValue = 0;
+
+        /// Signaled on the destination device after the copy out of pPrimaryStagingUpload, so that
+        /// the slot is not overwritten by the CPU while that copy is still pending.
+        RefCntAutoPtr<IFence> pPrimaryFence;
+        Uint64                PrimaryFenceValue = 0;
     };
 
     CrossDeviceTransferManager() noexcept = default;

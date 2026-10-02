@@ -44,10 +44,13 @@ class CommandContext;
 class QueryManagerD3D12
 {
 public:
+    // NodeMask: node of the command queue the queries are recorded on (linked multi-GPU). Query
+    // heaps and the resolve buffer must be on that node. 0 means single-node (the D3D12 default).
     QueryManagerD3D12(class RenderDeviceD3D12Impl* pDeviceD3D12Impl,
                       const Uint32                 QueryHeapSizes[],
                       SoftwareQueueIndex           CommandQueueId,
-                      HardwareQueueIndex           HwQueueInd);
+                      HardwareQueueIndex           HwQueueInd,
+                      UINT                         NodeMask = 0);
     ~QueryManagerD3D12();
 
     // clang-format off

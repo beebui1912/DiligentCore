@@ -469,10 +469,12 @@ void EngineFactoryD3D12Impl::CreateDeviceAndContextsD3D12(const EngineD3D12Creat
         //d3d12Device->SetStablePowerState(TRUE);
 #endif
 
+        Uint32 AdapterNodeCount = 1;
         {
             CComPtr<IDXGIAdapter1>    pDXGIAdapter1 = DXGIAdapterFromD3D12Device(d3d12Device);
             const GraphicsAdapterInfo AdapterInfo   = GetGraphicsAdapterInfo(d3d12Device, pDXGIAdapter1);
             VerifyEngineCreateInfo(EngineCI, AdapterInfo);
+            AdapterNodeCount = AdapterInfo.NodeCount;
         }
 
         // Describe and create the command queue.
@@ -483,11 +485,21 @@ void EngineFactoryD3D12Impl::CreateDeviceAndContextsD3D12(const EngineD3D12Creat
             queueDesc.Priority = QueuePriorityToD3D12QueuePriority(ContextCI.Priority);
             queueDesc.Type     = QueueIdToD3D12CommandListType(HardwareQueueIndex{ContextCI.QueueId});
             // In Linked Multi-GPU mode, route queue to the appropriate node via NodeMask.
-            // NodeIndex=0 maps to NodeMask=1 (D3D12 uses 1-based bit mask).
-            if (EngineCI.GpuMode == GPU_MODE_LINKED && ContextCI.NodeIndex < 32u)
+            // NodeIndex=0 maps to NodeMask=1 (D3D12 uses 1-based bit mask). In the other modes the
+            // node index is ignored and every queue is on node 0.
+            if (EngineCI.GpuMode == GPU_MODE_LINKED)
+            {
+                if (ContextCI.NodeIndex >= AdapterNodeCount)
+                {
+                    LOG_ERROR_AND_THROW("Immediate context '", (ContextCI.Name != nullptr ? ContextCI.Name : ""), "' requests node ",
+                                        Uint32{ContextCI.NodeIndex}, ", but the adapter has ", AdapterNodeCount, " linked node(s)");
+                }
                 queueDesc.NodeMask = 1u << ContextCI.NodeIndex;
+            }
             else
+            {
                 queueDesc.NodeMask = 1; // default: node 0
+            }
 
             CComPtr<ID3D12CommandQueue> pd3d12CmdQueue;
             hr = d3d12Device->CreateCommandQueue(&queueDesc, __uuidof(pd3d12CmdQueue), reinterpret_cast<void**>(static_cast<ID3D12CommandQueue**>(&pd3d12CmdQueue)));
@@ -621,9 +633,20 @@ void EngineFactoryD3D12Impl::AttachToD3D12Device(void*                        pd
 
         for (Uint32 CtxInd = 0; CtxInd < NumImmediateContexts; ++CtxInd)
         {
-            const D3D12_COMMAND_LIST_TYPE d3d12CmdListType = ppCommandQueues[CtxInd]->GetD3D12CommandQueueDesc().Type;
-            const HardwareQueueIndex      QueueId          = D3D12CommandListTypeToQueueId(d3d12CmdListType);
-            const Uint32                  NodeIndex        = (EngineCI.NumImmediateContexts > 0) ? pImmediateContextInfo[CtxInd].NodeIndex : 0u;
+            const D3D12_COMMAND_QUEUE_DESC d3d12QueueDesc   = ppCommandQueues[CtxInd]->GetD3D12CommandQueueDesc();
+            const D3D12_COMMAND_LIST_TYPE  d3d12CmdListType = d3d12QueueDesc.Type;
+            const HardwareQueueIndex       QueueId          = D3D12CommandListTypeToQueueId(d3d12CmdListType);
+            // The context works on the node its queue was created on (descriptor heaps, dynamic upload
+            // pages and command lists must all match the queue's node). Taking it from the queue rather
+            // than from the create info also covers queues created by the application.
+            Uint32 NodeIndex = 0;
+            if (AdapterInfo.NodeCount > 1 && d3d12QueueDesc.NodeMask != 0)
+            {
+                while ((d3d12QueueDesc.NodeMask & (1u << NodeIndex)) == 0)
+                    ++NodeIndex;
+                if (NodeIndex >= AdapterInfo.NodeCount)
+                    LOG_ERROR_AND_THROW("Command queue ", CtxInd, " is on node ", NodeIndex, ", which is not exposed (", AdapterInfo.NodeCount, " node(s))");
+            }
 
             RefCntAutoPtr<DeviceContextD3D12Impl> pImmediateCtxD3D12{
                 NEW_RC_OBJ(RawMemAllocator, "DeviceContextD3D12Impl instance", DeviceContextD3D12Impl)(
@@ -768,9 +791,12 @@ GraphicsAdapterInfo EngineFactoryD3D12Impl::GetGraphicsAdapterInfo(void*        
     // Set multi-GPU node info
     if (d3d12Device)
     {
-        const UINT NodeCount     = d3d12Device->GetNodeCount();
-        AdapterInfo.NodeCount    = NodeCount;
-        AdapterInfo.NodeMask     = (1u << NodeCount) - 1u;
+        // The device keeps per-node state (shader-visible descriptor heaps) in arrays of
+        // DILIGENT_MAX_LINKED_GPU_NODES entries, so nodes beyond that are not exposed.
+        // Single-GPU devices report one node and are not affected.
+        const UINT NodeCount = std::min(d3d12Device->GetNodeCount(), UINT{DILIGENT_MAX_LINKED_GPU_NODES});
+        AdapterInfo.NodeCount = NodeCount;
+        AdapterInfo.NodeMask  = (1u << NodeCount) - 1u;
     }
 
     // Set queue info

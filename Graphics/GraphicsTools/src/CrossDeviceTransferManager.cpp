@@ -82,6 +82,7 @@ void CrossDeviceTransferManager::Init(IRenderDevice*     pSrcDevice,
         if (m_pDstDevice)
         {
             m_pDstDevice->CreateTexture(StagingUploadDesc, nullptr, &m_Buffers[i].pPrimaryStagingUpload);
+            m_pDstDevice->CreateFence(fenceDesc, &m_Buffers[i].pPrimaryFence);
         }
     }
 
@@ -93,10 +94,12 @@ void CrossDeviceTransferManager::CopySourceFrame(IDeviceContext* pSrcContext,
                                                  Uint32          FrameId)
 {
     VERIFY_EXPR(pSrcContext != nullptr && pSrcTexture != nullptr);
-    if (!m_Initialized || !pSrcContext || !pSrcTexture)
+    if (!pSrcContext || !pSrcTexture)
         return;
 
     std::lock_guard<std::mutex> Lock{m_Mtx};
+    if (!m_Initialized)
+        return;
     Uint32 slot = FrameId % m_Latency;
 
     // Copy the rendered frame from the source render target to the CPU-readable staging texture.
@@ -107,6 +110,9 @@ void CrossDeviceTransferManager::CopySourceFrame(IDeviceContext* pSrcContext,
     // Signal the fence so the destination side knows when the copy is complete.
     m_Buffers[slot].FenceValue++;
     pSrcContext->EnqueueSignal(m_Buffers[slot].pSecondaryFence, m_Buffers[slot].FenceValue);
+    // A signal is only executed once the context is flushed. Without this, TransferReadyFrame()
+    // would wait for a value that is never signaled if the application does not flush in between.
+    pSrcContext->Flush();
 }
 
 bool CrossDeviceTransferManager::TransferReadyFrame(IDeviceContext* pSrcContext,
@@ -114,15 +120,18 @@ bool CrossDeviceTransferManager::TransferReadyFrame(IDeviceContext* pSrcContext,
                                                     ITexture*       pDstTexture,
                                                     Uint32          FrameId)
 {
-    VERIFY_EXPR(pSrcContext != nullptr && pDstContext != nullptr && pDstTexture != nullptr);
-    if (!m_Initialized || !pSrcContext || !pDstContext || !pDstTexture)
+    std::lock_guard<std::mutex> Lock{m_Mtx};
+    if (!m_Initialized)
         return false;
 
-    // During the initial latency window, we are still filling the pipeline.
+    // During the initial latency window, we are still filling the pipeline. This is not an error,
+    // so it is checked before the arguments are validated.
     if (FrameId < m_Latency - 1)
         return false;
 
-    std::lock_guard<std::mutex> Lock{m_Mtx};
+    VERIFY_EXPR(pSrcContext != nullptr && pDstContext != nullptr && pDstTexture != nullptr);
+    if (!pSrcContext || !pDstContext || !pDstTexture)
+        return false;
     Uint32 readSlot = (FrameId - (m_Latency - 1)) % m_Latency;
 
     FrameBufferTransfer& Transfer = m_Buffers[readSlot];
@@ -149,6 +158,15 @@ bool CrossDeviceTransferManager::TransferReadyFrame(IDeviceContext* pSrcContext,
     {
         LOG_ERROR_MESSAGE("CrossDeviceTransferManager: Failed to map source staging readback texture.");
         return false;
+    }
+
+    // The destination GPU may still be copying out of this slot's upload texture (submitted
+    // m_Latency transfers ago). Wait for that copy before the CPU overwrites the texture; the
+    // destination context is flushed only if the copy has not been submitted yet.
+    if (Transfer.pPrimaryFence && Transfer.pPrimaryFence->GetCompletedValue() < Transfer.PrimaryFenceValue)
+    {
+        pDstContext->Flush();
+        Transfer.pPrimaryFence->Wait(Transfer.PrimaryFenceValue);
     }
 
     // Map the destination staging upload texture for writing.
@@ -184,16 +202,17 @@ bool CrossDeviceTransferManager::TransferReadyFrame(IDeviceContext* pSrcContext,
     CopyTextureAttribs dstCopyAttribs(Transfer.pPrimaryStagingUpload, RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
                                       pDstTexture, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     pDstContext->CopyTexture(dstCopyAttribs);
+    if (Transfer.pPrimaryFence)
+        pDstContext->EnqueueSignal(Transfer.pPrimaryFence, ++Transfer.PrimaryFenceValue);
 
     return true;
 }
 
 void CrossDeviceTransferManager::WaitForFrame(Uint32 FrameId)
 {
+    std::lock_guard<std::mutex> Lock{m_Mtx};
     if (!m_Initialized)
         return;
-
-    std::lock_guard<std::mutex> Lock{m_Mtx};
     Uint32 slot = FrameId % m_Latency;
     if (m_Buffers[slot].pSecondaryFence && m_Buffers[slot].FenceValue > 0)
     {

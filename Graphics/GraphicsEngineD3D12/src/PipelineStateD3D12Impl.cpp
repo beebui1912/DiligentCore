@@ -718,7 +718,7 @@ void PipelineStateD3D12Impl::InitializePipeline(const GraphicsPipelineStateCreat
         // For single GPU operation, set this to zero. If there are multiple GPU nodes,
         // set bits to identify the nodes (the device's physical adapters) for which the
         // graphics pipeline state is to apply. Each bit in the mask corresponds to a single node.
-        d3d12PSODesc.NodeMask = 0;
+        d3d12PSODesc.NodeMask = m_pDevice->GetSharedNodeMask(); // 0 unless the adapter has linked nodes
 
         d3d12PSODesc.CachedPSO.pCachedBlob           = nullptr;
         d3d12PSODesc.CachedPSO.CachedBlobSizeInBytes = 0;
@@ -807,7 +807,7 @@ void PipelineStateD3D12Impl::InitializePipeline(const GraphicsPipelineStateCreat
         // For single GPU operation, set this to zero. If there are multiple GPU nodes,
         // set bits to identify the nodes (the device's physical adapters) for which the
         // graphics pipeline state is to apply. Each bit in the mask corresponds to a single node.
-        d3d12PSODesc.NodeMask = 0;
+        d3d12PSODesc.NodeMask = m_pDevice->GetSharedNodeMask(); // 0 unless the adapter has linked nodes
 
         d3d12PSODesc.CachedPSO->pCachedBlob           = nullptr;
         d3d12PSODesc.CachedPSO->CachedBlobSizeInBytes = 0;
@@ -855,7 +855,7 @@ void PipelineStateD3D12Impl::InitializePipeline(const ComputePipelineStateCreate
     // For single GPU operation, set this to zero. If there are multiple GPU nodes,
     // set bits to identify the nodes (the device's physical adapters) for which the
     // graphics pipeline state is to apply. Each bit in the mask corresponds to a single node.
-    d3d12PSODesc.NodeMask = 0;
+    d3d12PSODesc.NodeMask = m_pDevice->GetSharedNodeMask(); // 0 unless the adapter has linked nodes
 
     d3d12PSODesc.CachedPSO.pCachedBlob           = nullptr;
     d3d12PSODesc.CachedPSO.CachedBlobSizeInBytes = 0;

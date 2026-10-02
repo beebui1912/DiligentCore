@@ -253,7 +253,8 @@ RootSignatureD3D12::RootSignatureD3D12(IReferenceCounters*                      
 
         ID3D12Device* pd3d12Device = pDeviceD3D12Impl->GetD3D12Device();
 
-        hr = pd3d12Device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), __uuidof(m_pd3d12RootSignature), reinterpret_cast<void**>(static_cast<ID3D12RootSignature**>(&m_pd3d12RootSignature)));
+        // Node mask 0 on a single-node adapter; all linked nodes otherwise (see GetSharedNodeMask())
+        hr = pd3d12Device->CreateRootSignature(pDeviceD3D12Impl->GetSharedNodeMask(), signature->GetBufferPointer(), signature->GetBufferSize(), __uuidof(m_pd3d12RootSignature), reinterpret_cast<void**>(static_cast<ID3D12RootSignature**>(&m_pd3d12RootSignature)));
         CHECK_D3D_RESULT_THROW(hr, "Failed to create root signature");
     }
 }

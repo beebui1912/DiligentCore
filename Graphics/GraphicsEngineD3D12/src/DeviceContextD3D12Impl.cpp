@@ -120,7 +120,8 @@ DeviceContextD3D12Impl::DeviceContextD3D12Impl(IReferenceCounters*      pRefCoun
     D3D12_COMMAND_SIGNATURE_DESC CmdSignatureDesc = {};
     D3D12_INDIRECT_ARGUMENT_DESC IndirectArg      = {};
 
-    CmdSignatureDesc.NodeMask         = 0;
+    // 0 unless the adapter has linked nodes; then every node, since deferred command lists can run on any node
+    CmdSignatureDesc.NodeMask         = pDeviceD3D12Impl->GetSharedNodeMask();
     CmdSignatureDesc.NumArgumentDescs = 1;
     CmdSignatureDesc.pArgumentDescs   = &IndirectArg;
 
@@ -221,7 +222,7 @@ ID3D12CommandSignature* DeviceContextD3D12Impl::GetDrawIndirectSignature(Uint32 
         IndirectArg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
 
         D3D12_COMMAND_SIGNATURE_DESC CmdSignatureDesc{};
-        CmdSignatureDesc.NodeMask         = 0;
+        CmdSignatureDesc.NodeMask         = m_pDevice->GetSharedNodeMask(); // 0 unless the adapter has linked nodes
         CmdSignatureDesc.NumArgumentDescs = 1;
         CmdSignatureDesc.pArgumentDescs   = &IndirectArg;
         CmdSignatureDesc.ByteStride       = Stride;
@@ -243,7 +244,7 @@ ID3D12CommandSignature* DeviceContextD3D12Impl::GetDrawIndexedIndirectSignature(
         IndirectArg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
 
         D3D12_COMMAND_SIGNATURE_DESC CmdSignatureDesc{};
-        CmdSignatureDesc.NodeMask         = 0;
+        CmdSignatureDesc.NodeMask         = m_pDevice->GetSharedNodeMask(); // 0 unless the adapter has linked nodes
         CmdSignatureDesc.NumArgumentDescs = 1;
         CmdSignatureDesc.pArgumentDescs   = &IndirectArg;
         CmdSignatureDesc.ByteStride       = Stride;

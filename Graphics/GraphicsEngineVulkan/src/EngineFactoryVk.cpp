@@ -640,7 +640,7 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
                     if (Match && G.physicalDeviceCount > 1)
                     {
                         AdapterInfo.NodeCount = G.physicalDeviceCount;
-                        AdapterInfo.NodeMask  = (1u << G.physicalDeviceCount) - 1u;
+                        AdapterInfo.NodeMask  = G.physicalDeviceCount >= 32u ? ~0u : (1u << G.physicalDeviceCount) - 1u; // 1u << 32 is undefined
                         // Bump per-queue MaxDeviceContexts so samples that
                         // request one immediate context per linked node
                         // (Tutorial31_LinkedMultiGPU does exactly this) pass
@@ -1482,7 +1482,7 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
             if (DeviceGroupCI.physicalDeviceCount > 1)
             {
                 AdapterInfo.NodeCount = DeviceGroupCI.physicalDeviceCount;
-                AdapterInfo.NodeMask  = (1u << DeviceGroupCI.physicalDeviceCount) - 1u;
+                AdapterInfo.NodeMask  = DeviceGroupCI.physicalDeviceCount >= 32u ? ~0u : (1u << DeviceGroupCI.physicalDeviceCount) - 1u; // 1u << 32 is undefined
             }
 #else
             LOG_WARNING_MESSAGE("GPU_MODE_LINKED requires Volk for vkEnumeratePhysicalDeviceGroups. Falling back to single-GPU.");

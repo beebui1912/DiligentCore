@@ -261,6 +261,11 @@ public:
 
     Uint32 GetNodeCount() const { return m_NodeCount; }
 
+    // Node mask for device-wide objects that every node may use: pipeline states, root signatures
+    // and command signatures. 0 on a single-node adapter (the D3D12 default, unchanged behavior);
+    // all linked nodes otherwise, since an object created with mask 0 exists on node 0 only.
+    UINT GetSharedNodeMask() const { return m_NodeCount > 1 ? (1u << m_NodeCount) - 1u : 0u; }
+
     const GenerateMipsHelper& GetMipsGenerator() const { return m_MipsGenerator; }
 
     IDXCompiler* GetDxCompiler() const { return m_pDxCompiler.get(); }

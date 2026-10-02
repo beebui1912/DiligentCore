@@ -12,6 +12,7 @@
 #include <cstring>
 #include <unordered_map>
 #include <atomic>
+#include <mutex>
 
 #include "VulkanUtilities/Debug.hpp"
 #include "VulkanUtilities/LogicalDevice.hpp"
@@ -42,8 +43,12 @@ PFN_vkCreateDebugReportCallbackEXT  CreateDebugReportCallbackEXT  = nullptr;
 PFN_vkDestroyDebugReportCallbackEXT DestroyDebugReportCallbackEXT = nullptr;
 
 
-VkDebugUtilsMessengerEXT DbgMessenger = VK_NULL_HANDLE;
-VkDebugReportCallbackEXT DbgCallback  = VK_NULL_HANDLE;
+// Messengers and callbacks per instance: several Vulkan instances can be alive in one process (one per
+// render device), and each must destroy its own objects. A single global handle would be overwritten by
+// the second instance and then destroyed with the wrong one (VUID-vkDestroyDebugUtilsMessengerEXT-*).
+std::mutex                                                 g_DbgObjectsMtx;
+std::unordered_map<VkInstance, VkDebugUtilsMessengerEXT> g_DbgMessengers;
+std::unordered_map<VkInstance, VkDebugReportCallbackEXT> g_DbgCallbacks;
 
 std::unordered_map<HashMapStringKey, std::atomic<int>> g_IgnoreMessages;
 
@@ -216,10 +221,18 @@ bool SetupDebugUtils(VkInstance                          instance,
     DbgMessenger_CI.pfnUserCallback = DebugMessengerCallback;
     DbgMessenger_CI.pUserData       = pUserData;
 
-    VkResult err = CreateDebugUtilsMessengerEXT(instance, &DbgMessenger_CI, nullptr, &DbgMessenger);
+    VkDebugUtilsMessengerEXT DbgMessenger = VK_NULL_HANDLE;
+    VkResult                 err          = CreateDebugUtilsMessengerEXT(instance, &DbgMessenger_CI, nullptr, &DbgMessenger);
     VERIFY(err == VK_SUCCESS, "Failed to create debug utils messenger");
 
-    g_IgnoreMessages.clear();
+    std::lock_guard<std::mutex> Lock{g_DbgObjectsMtx};
+    const bool                  IsFirstInstance = g_DbgMessengers.empty();
+    if (DbgMessenger != VK_NULL_HANDLE)
+        g_DbgMessengers[instance] = DbgMessenger;
+
+    // Callbacks of instances that are already alive read this map, so it is only reset for the first one
+    if (IsFirstInstance)
+        g_IgnoreMessages.clear();
     // UNASSIGNED-CoreValidation-DrawState-ClearCmdBeforeDraw:
     // vkCmdClearAttachments() issued on command buffer object 0x... prior to any Draw Cmds. It is recommended you use RenderPass LOAD_OP_CLEAR on Attachments prior to any Draw.
     g_IgnoreMessages.emplace("UNASSIGNED-CoreValidation-DrawState-ClearCmdBeforeDraw", 0);
@@ -260,21 +273,33 @@ bool SetupDebugReport(VkInstance               instance,
     CallbackCI.pfnCallback = DebugReportCallback;
     CallbackCI.pUserData   = pUserData;
 
-    VkResult err = CreateDebugReportCallbackEXT(instance, &CallbackCI, nullptr, &DbgCallback);
+    VkDebugReportCallbackEXT DbgCallback = VK_NULL_HANDLE;
+    VkResult                 err         = CreateDebugReportCallbackEXT(instance, &CallbackCI, nullptr, &DbgCallback);
     VERIFY(err == VK_SUCCESS, "Failed to create debug report callback");
+    if (DbgCallback != VK_NULL_HANDLE)
+    {
+        std::lock_guard<std::mutex> Lock{g_DbgObjectsMtx};
+        g_DbgCallbacks[instance] = DbgCallback;
+    }
     return err == VK_SUCCESS;
 }
 
 
 void FreeDebug(VkInstance instance)
 {
-    if (DbgMessenger != VK_NULL_HANDLE)
+    std::lock_guard<std::mutex> Lock{g_DbgObjectsMtx};
+
+    auto Messenger = g_DbgMessengers.find(instance);
+    if (Messenger != g_DbgMessengers.end())
     {
-        DestroyDebugUtilsMessengerEXT(instance, DbgMessenger, nullptr);
+        DestroyDebugUtilsMessengerEXT(instance, Messenger->second, nullptr);
+        g_DbgMessengers.erase(Messenger);
     }
-    if (DbgCallback != VK_NULL_HANDLE)
+    auto Callback = g_DbgCallbacks.find(instance);
+    if (Callback != g_DbgCallbacks.end())
     {
-        DestroyDebugReportCallbackEXT(instance, DbgCallback, nullptr);
+        DestroyDebugReportCallbackEXT(instance, Callback->second, nullptr);
+        g_DbgCallbacks.erase(Callback);
     }
 
     for (const auto& it : g_IgnoreMessages)

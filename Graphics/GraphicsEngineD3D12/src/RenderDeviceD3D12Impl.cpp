@@ -272,9 +272,12 @@ RenderDeviceD3D12Impl::RenderDeviceD3D12Impl(IReferenceCounters*          pRefCo
         m_QueryMgrs.reserve(CommandQueueCount);
         for (Uint32 q = 0; q < CommandQueueCount; ++q)
         {
-            const D3D12_COMMAND_LIST_TYPE d3d12CmdListType = ppCmdQueues[q]->GetD3D12CommandQueueDesc().Type;
-            const HardwareQueueIndex      HWQueueId        = D3D12CommandListTypeToQueueId(d3d12CmdListType);
-            m_QueryMgrs.emplace_back(std::make_unique<QueryManagerD3D12>(this, EngineCI.QueryPoolSizes, SoftwareQueueIndex{q}, HWQueueId));
+            const D3D12_COMMAND_QUEUE_DESC d3d12QueueDesc   = ppCmdQueues[q]->GetD3D12CommandQueueDesc();
+            const D3D12_COMMAND_LIST_TYPE  d3d12CmdListType = d3d12QueueDesc.Type;
+            const HardwareQueueIndex       HWQueueId        = D3D12CommandListTypeToQueueId(d3d12CmdListType);
+            // Linked multi-GPU: queries live on the node of their queue. Single-node adapters keep mask 0.
+            const UINT QueryNodeMask = m_NodeCount > 1 ? d3d12QueueDesc.NodeMask : 0u;
+            m_QueryMgrs.emplace_back(std::make_unique<QueryManagerD3D12>(this, EngineCI.QueryPoolSizes, SoftwareQueueIndex{q}, HWQueueId, QueryNodeMask));
         }
 
         if (IsNvApiEnabled())
