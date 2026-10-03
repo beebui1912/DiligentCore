@@ -641,17 +641,11 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
                     {
                         AdapterInfo.NodeCount = G.physicalDeviceCount;
                         AdapterInfo.NodeMask  = G.physicalDeviceCount >= 32u ? ~0u : (1u << G.physicalDeviceCount) - 1u; // 1u << 32 is undefined
-                        // Bump per-queue MaxDeviceContexts so samples that
-                        // request one immediate context per linked node
-                        // (Tutorial31_LinkedMultiGPU does exactly this) pass
-                        // VerifyEngineCreateInfo.  On real linked hardware
-                        // the queue family reports a higher queueCount that
-                        // already covers per-node contexts.
-                        for (Uint32 q = 0; q < AdapterInfo.NumQueues; ++q)
-                        {
-                            if (AdapterInfo.Queues[q].MaxDeviceContexts < G.physicalDeviceCount)
-                                AdapterInfo.Queues[q].MaxDeviceContexts = G.physicalDeviceCount;
-                        }
+                        // MaxDeviceContexts stays the queue family's queueCount: every immediate
+                        // context gets a VkQueue of its own, and a family with fewer queues than
+                        // nodes cannot host one context per node (use another family for the
+                        // other nodes). Raising it made vkCreateDevice request more queues than
+                        // the family has (VUID-VkDeviceQueueCreateInfo-queueCount-00382).
                         break;
                     }
                 }

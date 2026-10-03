@@ -32,7 +32,8 @@
 namespace Diligent
 {
 
-D3D12DynamicPage::D3D12DynamicPage(ID3D12Device* pd3d12Device, Uint64 Size, Uint32 CreationNodeMask, Uint32 VisibleNodeMask)
+D3D12DynamicPage::D3D12DynamicPage(ID3D12Device* pd3d12Device, Uint64 Size, Uint32 CreationNodeMask, Uint32 VisibleNodeMask) :
+    m_NodeMask{CreationNodeMask != 0 ? CreationNodeMask : 1u}
 {
     D3D12_HEAP_PROPERTIES HeapProps;
     HeapProps.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
@@ -82,13 +83,10 @@ D3D12DynamicMemoryManager::D3D12DynamicMemoryManager(IMemoryAllocator&      Allo
     m_DeviceD3D12Impl{DeviceD3D12Impl},
     m_AvailablePages(STD_ALLOCATOR_RAW_MEM(AvailablePagesMapElemType, Allocator, "Allocator for multimap<AvailablePagesMapElemType>"))
 {
-    // Pages are shared by the contexts of all nodes (any page can be handed to any context), so on a
-    // linked adapter they are visible to every node. Single-node adapters keep node mask 1.
-    const Uint32 AllNodesMask = m_DeviceD3D12Impl.GetAdapterInfo().NodeMask;
-    const Uint32 VisibleMask  = AllNodesMask > 1 ? AllNodesMask : 1u;
+    // Reserved pages are on node 0; contexts of other nodes of a linked adapter get pages of their own
     for (Uint32 i = 0; i < NumPagesToReserve; ++i)
     {
-        D3D12DynamicPage Page(m_DeviceD3D12Impl.GetD3D12Device(), PageSize, 1u, VisibleMask);
+        D3D12DynamicPage Page(m_DeviceD3D12Impl.GetD3D12Device(), PageSize);
         Uint64           Size = Page.GetSize();
         m_AvailablePages.emplace(Size, std::move(Page));
     }
@@ -100,7 +98,12 @@ D3D12DynamicPage D3D12DynamicMemoryManager::AllocatePage(Uint64 SizeInBytes, Uin
 #ifdef DILIGENT_DEVELOPMENT
     ++m_AllocatedPageCounter;
 #endif
+    // The first page that is large enough and on the requested node. A page is used only by the
+    // node it was created on: other nodes of a linked adapter may not be able to see it (cross-node
+    // sharing tier), and local upload memory is what a context should use anyway.
     auto PageIt = m_AvailablePages.lower_bound(SizeInBytes); // Returns an iterator pointing to the first element that is not less than key
+    while (PageIt != m_AvailablePages.end() && PageIt->second.GetNodeMask() != (NodeMask != 0 ? NodeMask : 1u))
+        ++PageIt;
     if (PageIt != m_AvailablePages.end())
     {
         VERIFY_EXPR(PageIt->first >= SizeInBytes);
@@ -110,11 +113,10 @@ D3D12DynamicPage D3D12DynamicMemoryManager::AllocatePage(Uint64 SizeInBytes, Uin
     }
     else
     {
-        // Upload heap: created on the specified node, visible from all nodes so any GPU can read.
-        // For single-GPU (NodeMask=1) this is equivalent to the old behavior.
-        const Uint32 AllNodesMask = m_DeviceD3D12Impl.GetAdapterInfo().NodeMask;
-        const Uint32 VisibleMask  = (AllNodesMask > 1) ? AllNodesMask : NodeMask;
-        return D3D12DynamicPage{m_DeviceD3D12Impl.GetD3D12Device(), SizeInBytes, NodeMask, VisibleMask};
+        // Upload heap on the requesting context's node, visible to that node (NodeMask=1 on
+        // single-GPU: the old behavior)
+        const Uint32 Node = NodeMask != 0 ? NodeMask : 1u;
+        return D3D12DynamicPage{m_DeviceD3D12Impl.GetD3D12Device(), SizeInBytes, Node, Node};
     }
 }
 

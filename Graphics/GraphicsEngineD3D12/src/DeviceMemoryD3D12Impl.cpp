@@ -211,17 +211,12 @@ Bool DeviceMemoryD3D12Impl::Resize(Uint64 NewSize)
     d3d12HeapDesc.Properties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
     d3d12HeapDesc.Properties.CreationNodeMask     = 1;
     d3d12HeapDesc.Properties.VisibleNodeMask      = 1;
-    // For linked multi-GPU: device memory heaps should be visible from all nodes
-    // so sparse bindings can be issued from any GPU node's command queue.
-    {
-        const Uint32 AdapterNodeMask = m_pDevice->GetAdapterInfo().NodeMask;
-        if (AdapterNodeMask > 1)
-        {
-            d3d12HeapDesc.Properties.VisibleNodeMask = AdapterNodeMask;
-        }
-    }
     d3d12HeapDesc.Alignment                       = m_AllowMSAA ? D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT : D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
     d3d12HeapDesc.Flags                           = m_d3d12HeapFlags;
+    // For linked multi-GPU: device memory heaps should be visible from all nodes so sparse bindings
+    // can be issued from any GPU node's command queue, if the adapter supports cross-node sharing
+    if (const UINT AllNodes = m_pDevice->GetCrossNodeVisibleMask())
+        d3d12HeapDesc.Properties.VisibleNodeMask = AllNodes;
 
     const size_t NewPageCount = StaticCast<size_t>(NewSize / m_Desc.PageSize);
     m_Pages.reserve(NewPageCount);

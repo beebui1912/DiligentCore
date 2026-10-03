@@ -178,6 +178,14 @@ RenderDeviceD3D12Impl::RenderDeviceD3D12Impl(IReferenceCounters*          pRefCo
 {
     m_DeviceInfo.Type = RENDER_DEVICE_TYPE_D3D12;
 
+    // Linked adapter: whether resources may be visible to nodes other than their creation node
+    if (m_NodeCount > 1)
+    {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS Options{};
+        m_CrossNodeSharing = SUCCEEDED(pd3d12Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &Options, sizeof(Options))) &&
+            Options.CrossNodeSharingTier != D3D12_CROSS_NODE_SHARING_TIER_NOT_SUPPORTED;
+    }
+
     // Create per-node GPU descriptor heaps
     for (Uint32 node = 0; node < m_NodeCount && node < DILIGENT_MAX_LINKED_GPU_NODES; ++node)
     {

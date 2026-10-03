@@ -266,6 +266,10 @@ public:
     // all linked nodes otherwise, since an object created with mask 0 exists on node 0 only.
     UINT GetSharedNodeMask() const { return m_NodeCount > 1 ? (1u << m_NodeCount) - 1u : 0u; }
 
+    // All nodes, for resources that every node may access, if the linked adapter supports cross-node
+    // sharing (D3D12_FEATURE_D3D12_OPTIONS::CrossNodeSharingTier); 0 otherwise and on single-node adapters
+    UINT GetCrossNodeVisibleMask() const { return m_NodeCount > 1 && m_CrossNodeSharing ? (1u << m_NodeCount) - 1u : 0u; }
+
     const GenerateMipsHelper& GetMipsGenerator() const { return m_MipsGenerator; }
 
     IDXCompiler* GetDxCompiler() const { return m_pDxCompiler.get(); }
@@ -321,7 +325,8 @@ private:
     // In single-GPU mode, only m_GPUDescriptorHeaps[0] is used (NodeCount=1).
     // Index: [NodeIndex][HeapType] where HeapType is CBV_SRV_UAV(0) or SAMPLER(1).
     std::unique_ptr<GPUDescriptorHeap> m_GPUDescriptorHeaps[DILIGENT_MAX_LINKED_GPU_NODES][2];
-    Uint32 m_NodeCount = 1;
+    Uint32 m_NodeCount        = 1;
+    bool   m_CrossNodeSharing = false; // linked adapter supports cross-node sharing (tier above NOT_SUPPORTED)
 
     CommandListManager m_CmdListManagers[3]; // 0 - direct, 1 - compute, 2 - copy
 

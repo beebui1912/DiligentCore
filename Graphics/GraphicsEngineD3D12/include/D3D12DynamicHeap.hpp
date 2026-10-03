@@ -112,8 +112,12 @@ public:
 
     bool IsValid() const { return m_pd3d12Buffer != nullptr; }
 
+    // Node the page was created on (linked multi-GPU); 1 on single-node adapters
+    Uint32 GetNodeMask() const { return m_NodeMask; }
+
 private:
     CComPtr<ID3D12Resource>   m_pd3d12Buffer;
+    Uint32                    m_NodeMask          = 1;
     void*                     m_CPUVirtualAddress = nullptr; // The CPU-writeable address
     D3D12_GPU_VIRTUAL_ADDRESS m_GPUVirtualAddress = 0;       // The GPU-visible address
 };
