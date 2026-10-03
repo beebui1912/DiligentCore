@@ -82,9 +82,13 @@ D3D12DynamicMemoryManager::D3D12DynamicMemoryManager(IMemoryAllocator&      Allo
     m_DeviceD3D12Impl{DeviceD3D12Impl},
     m_AvailablePages(STD_ALLOCATOR_RAW_MEM(AvailablePagesMapElemType, Allocator, "Allocator for multimap<AvailablePagesMapElemType>"))
 {
+    // Pages are shared by the contexts of all nodes (any page can be handed to any context), so on a
+    // linked adapter they are visible to every node. Single-node adapters keep node mask 1.
+    const Uint32 AllNodesMask = m_DeviceD3D12Impl.GetAdapterInfo().NodeMask;
+    const Uint32 VisibleMask  = AllNodesMask > 1 ? AllNodesMask : 1u;
     for (Uint32 i = 0; i < NumPagesToReserve; ++i)
     {
-        D3D12DynamicPage Page(m_DeviceD3D12Impl.GetD3D12Device(), PageSize);
+        D3D12DynamicPage Page(m_DeviceD3D12Impl.GetD3D12Device(), PageSize, 1u, VisibleMask);
         Uint64           Size = Page.GetSize();
         m_AvailablePages.emplace(Size, std::move(Page));
     }
