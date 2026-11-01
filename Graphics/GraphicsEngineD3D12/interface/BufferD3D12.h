@@ -76,6 +76,13 @@ DILIGENT_BEGIN_INTERFACE(IBufferD3D12, IBuffer)
     /// If the state is unknown to the engine (Diligent::RESOURCE_STATE_UNKNOWN),
     /// returns `D3D12_RESOURCE_STATE_COMMON` (0).
     VIRTUAL D3D12_RESOURCE_STATES METHOD(GetD3D12ResourceState)(THIS) CONST PURE;
+
+    /// Returns the shared heap of a buffer created with Diligent::MISC_BUFFER_FLAG_SHARED_CROSS_ADAPTER,
+    /// or null for any other buffer.
+
+    /// The method does **NOT** increment the reference counter of the returned object,
+    /// so Release() **must not** be called.
+    VIRTUAL ID3D12Heap* METHOD(GetD3D12SharedHeap)(THIS) CONST PURE;
 };
 DILIGENT_END_INTERFACE
 
@@ -86,6 +93,7 @@ DILIGENT_END_INTERFACE
 #    define IBufferD3D12_GetD3D12Buffer(This, ...)        CALL_IFACE_METHOD(BufferD3D12, GetD3D12Buffer,        This, __VA_ARGS__)
 #    define IBufferD3D12_SetD3D12ResourceState(This, ...) CALL_IFACE_METHOD(BufferD3D12, SetD3D12ResourceState, This, __VA_ARGS__)
 #    define IBufferD3D12_GetD3D12ResourceState(This)      CALL_IFACE_METHOD(BufferD3D12, GetD3D12ResourceState, This)
+#    define IBufferD3D12_GetD3D12SharedHeap(This)         CALL_IFACE_METHOD(BufferD3D12, GetD3D12SharedHeap,    This)
 
 #endif
 

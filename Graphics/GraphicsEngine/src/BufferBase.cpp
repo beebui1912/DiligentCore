@@ -88,6 +88,12 @@ void ValidateBufferDesc(const BufferDesc& Desc, const IRenderDevice* pDevice) no
                       "BIND_INDIRECT_DRAW_ARGS flag can't be used when DRAW_COMMAND_CAP_FLAG_DRAW_INDIRECT capability is not supported");
     }
 
+    if ((Desc.MiscFlags & MISC_BUFFER_FLAG_SHARED_CROSS_ADAPTER) != 0)
+    {
+        VERIFY_BUFFER(pDevice->GetDeviceInfo().Type == RENDER_DEVICE_TYPE_D3D12, "MISC_BUFFER_FLAG_SHARED_CROSS_ADAPTER is only supported in Direct3D12.");
+        VERIFY_BUFFER(Desc.Usage == USAGE_DEFAULT, "MISC_BUFFER_FLAG_SHARED_CROSS_ADAPTER requires USAGE_DEFAULT.");
+    }
+
     switch (Desc.Usage)
     {
         case USAGE_IMMUTABLE:

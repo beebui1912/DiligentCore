@@ -84,6 +84,9 @@ public:
     /// Implementation of IBufferD3D12::GetD3D12ResourceState().
     virtual D3D12_RESOURCE_STATES DILIGENT_CALL_TYPE GetD3D12ResourceState() const override final;
 
+    /// Implementation of IBufferD3D12::GetD3D12SharedHeap().
+    virtual ID3D12Heap* DILIGENT_CALL_TYPE GetD3D12SharedHeap() const override final { return m_pd3d12SharedHeap; }
+
     __forceinline D3D12_GPU_VIRTUAL_ADDRESS GetGPUAddress()
     {
         VERIFY_EXPR(m_Desc.Usage != USAGE_DYNAMIC);
@@ -104,6 +107,10 @@ private:
 
 private:
     DescriptorHeapAllocation m_CBVDescriptorAllocation;
+
+    // MISC_BUFFER_FLAG_SHARED_CROSS_ADAPTER: the heap the buffer is placed in. The placed
+    // resource also holds a reference to it, so it lives as long as the resource does.
+    CComPtr<ID3D12Heap> m_pd3d12SharedHeap;
 };
 
 } // namespace Diligent

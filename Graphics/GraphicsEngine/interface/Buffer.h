@@ -79,6 +79,16 @@ DILIGENT_TYPED_ENUM(MISC_BUFFER_FLAGS, Uint8)
     /// For a sparse buffer, allow binding the same memory region in different buffer ranges
     /// or in different sparse buffers.
     MISC_BUFFER_FLAG_SPARSE_ALIASING = 1u << 0,
+
+    /// Direct3D12 only: the buffer can be shared with a device on another adapter (unlinked multi-GPU).
+    /// It is placed at the start of its own shared cross-adapter heap. It must be a USAGE_DEFAULT buffer.
+    ///
+    /// \note  Direct3D12 shares the heap, not the buffer. Call ID3D12Device::CreateSharedHandle() for the
+    ///        heap returned by IBufferD3D12::GetD3D12SharedHeap(). On the other device, call
+    ///        ID3D12Device::OpenSharedHandle(), ID3D12Device::CreatePlacedResource() with the same
+    ///        resource description at offset 0, and IRenderDeviceD3D12::CreateBufferFromD3DResource().
+    ///        The application must synchronize the devices.
+    MISC_BUFFER_FLAG_SHARED_CROSS_ADAPTER = 1u << 1,
 };
 DEFINE_FLAG_ENUM_OPERATORS(MISC_BUFFER_FLAGS)
 

@@ -30,6 +30,7 @@
 #    include <d3d12.h>
 #    include "RenderDeviceD3D12.h"
 #    include "TextureD3D12.h"
+#    include "BufferD3D12.h"
 #endif
 
 #include <cstring>
@@ -92,7 +93,182 @@ TEST(SharedCrossAdapterTexture, InvalidDesc)
     }
 }
 
+BufferDesc GetSharedBufferDesc()
+{
+    BufferDesc Desc;
+    Desc.Name      = "Shared cross-adapter buffer";
+    Desc.Size      = 4096;
+    Desc.Usage     = USAGE_DEFAULT;
+    Desc.BindFlags = BIND_SHADER_RESOURCE | BIND_UNORDERED_ACCESS;
+    Desc.Mode      = BUFFER_MODE_RAW;
+    Desc.MiscFlags = MISC_BUFFER_FLAG_SHARED_CROSS_ADAPTER;
+    return Desc;
+}
+
+TEST(SharedCrossAdapterBuffer, InvalidDesc)
+{
+    GPUTestingEnvironment* pEnv    = GPUTestingEnvironment::GetInstance();
+    IRenderDevice*         pDevice = pEnv->GetDevice();
+
+    GPUTestingEnvironment::ScopedReset EnvironmentAutoReset;
+
+    BufferDesc Desc = GetSharedBufferDesc();
+    if (pDevice->GetDeviceInfo().Type != RENDER_DEVICE_TYPE_D3D12)
+    {
+        TestingEnvironment::ErrorScope ExpectedErrors{"Failed to create Buffer", "is only supported in Direct3D12"};
+        RefCntAutoPtr<IBuffer>         pBuffer;
+        pDevice->CreateBuffer(Desc, nullptr, &pBuffer);
+        EXPECT_EQ(pBuffer, nullptr);
+        return;
+    }
+
+    Desc.Usage          = USAGE_STAGING;
+    Desc.BindFlags      = BIND_NONE;
+    Desc.CPUAccessFlags = CPU_ACCESS_READ;
+    TestingEnvironment::ErrorScope ExpectedErrors{"Failed to create Buffer", "requires USAGE_DEFAULT"};
+    RefCntAutoPtr<IBuffer>         pBuffer;
+    pDevice->CreateBuffer(Desc, nullptr, &pBuffer);
+    EXPECT_EQ(pBuffer, nullptr);
+}
+
 #if D3D12_SUPPORTED
+// An ordinary buffer has no shared heap
+TEST(SharedCrossAdapterBuffer, NoHeapWithoutFlag)
+{
+    GPUTestingEnvironment* pEnv    = GPUTestingEnvironment::GetInstance();
+    IRenderDevice*         pDevice = pEnv->GetDevice();
+    if (pDevice->GetDeviceInfo().Type != RENDER_DEVICE_TYPE_D3D12)
+        GTEST_SKIP() << "Direct3D12 only";
+
+    GPUTestingEnvironment::ScopedReset EnvironmentAutoReset;
+
+    BufferDesc Desc = GetSharedBufferDesc();
+    Desc.MiscFlags  = MISC_BUFFER_FLAG_NONE;
+
+    RefCntAutoPtr<IBuffer> pBuffer;
+    pDevice->CreateBuffer(Desc, nullptr, &pBuffer);
+    ASSERT_NE(pBuffer, nullptr);
+
+    RefCntAutoPtr<IBufferD3D12> pBufferD3D12{pBuffer, IID_BufferD3D12};
+    ASSERT_NE(pBufferD3D12, nullptr);
+    EXPECT_EQ(pBufferD3D12->GetD3D12SharedHeap(), nullptr);
+}
+#endif
+
+#if D3D12_SUPPORTED
+
+// The sharing path on one device: the handle is the same for a device on another adapter
+TEST(SharedCrossAdapterBuffer, CopyThroughSharedHandle)
+{
+    GPUTestingEnvironment* pEnv     = GPUTestingEnvironment::GetInstance();
+    IRenderDevice*         pDevice  = pEnv->GetDevice();
+    IDeviceContext*        pContext = pEnv->GetDeviceContext();
+    if (pDevice->GetDeviceInfo().Type != RENDER_DEVICE_TYPE_D3D12)
+        GTEST_SKIP() << "Direct3D12 only";
+
+    GPUTestingEnvironment::ScopedReset EnvironmentAutoReset;
+
+    RefCntAutoPtr<IRenderDeviceD3D12> pDeviceD3D12{pDevice, IID_RenderDeviceD3D12};
+    ASSERT_NE(pDeviceD3D12, nullptr);
+    ID3D12Device* pd3d12Device = pDeviceD3D12->GetD3D12Device();
+
+    const BufferDesc SharedDesc = GetSharedBufferDesc();
+
+    const auto MakeData = [&SharedDesc](Uint8 Seed) {
+        std::vector<Uint8> Data(static_cast<size_t>(SharedDesc.Size));
+        for (size_t i = 0; i < Data.size(); ++i)
+            Data[i] = static_cast<Uint8>(i * 13 + Seed);
+        return Data;
+    };
+    const std::vector<Uint8> InitialData = MakeData(7);
+    const std::vector<Uint8> CopiedData  = MakeData(101);
+
+    // Initial data goes through the same creation path as an empty shared buffer
+    const BufferData       SharedInit{InitialData.data(), InitialData.size()};
+    RefCntAutoPtr<IBuffer> pShared;
+    pDevice->CreateBuffer(SharedDesc, &SharedInit, &pShared);
+    ASSERT_NE(pShared, nullptr);
+
+    RefCntAutoPtr<IBufferD3D12> pSharedD3D12{pShared, IID_BufferD3D12};
+    ASSERT_NE(pSharedD3D12, nullptr);
+
+    Uint64          DataStartByteOffset = 0;
+    ID3D12Resource* pd3d12Shared        = pSharedD3D12->GetD3D12Buffer(DataStartByteOffset, pContext);
+    ASSERT_NE(pd3d12Shared, nullptr);
+    EXPECT_NE(pd3d12Shared->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER, D3D12_RESOURCE_FLAG_NONE);
+
+    ASSERT_NE(pSharedD3D12->GetD3D12SharedHeap(), nullptr);
+
+    HANDLE hShared = nullptr;
+    ASSERT_TRUE(SUCCEEDED(pd3d12Device->CreateSharedHandle(pSharedD3D12->GetD3D12SharedHeap(), nullptr, GENERIC_ALL, nullptr, &hShared)));
+
+    ID3D12Heap* pOpenedHeap = nullptr;
+    HRESULT     hr          = pd3d12Device->OpenSharedHandle(hShared, IID_PPV_ARGS(&pOpenedHeap));
+    CloseHandle(hShared);
+    ASSERT_TRUE(SUCCEEDED(hr));
+
+    const D3D12_RESOURCE_DESC d3d12SharedDesc = pd3d12Shared->GetDesc();
+    ID3D12Resource*           pOpened         = nullptr;
+    hr                                        = pd3d12Device->CreatePlacedResource(pOpenedHeap, 0, &d3d12SharedDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pOpened));
+    pOpenedHeap->Release();
+    ASSERT_TRUE(SUCCEEDED(hr));
+
+    BufferDesc ImportDesc = SharedDesc;
+    ImportDesc.Name       = "Imported shared buffer";
+    ImportDesc.MiscFlags  = MISC_BUFFER_FLAG_NONE;
+
+    RefCntAutoPtr<IBuffer> pImported;
+    pDeviceD3D12->CreateBufferFromD3DResource(pOpened, ImportDesc, RESOURCE_STATE_COMMON, &pImported);
+    pOpened->Release();
+    ASSERT_NE(pImported, nullptr);
+
+    BufferDesc StagingDesc;
+    StagingDesc.Name           = "Staging buffer";
+    StagingDesc.Size           = SharedDesc.Size;
+    StagingDesc.Usage          = USAGE_STAGING;
+    StagingDesc.CPUAccessFlags = CPU_ACCESS_READ;
+
+    RefCntAutoPtr<IBuffer> pStaging;
+    pDevice->CreateBuffer(StagingDesc, nullptr, &pStaging);
+    ASSERT_NE(pStaging, nullptr);
+
+    const auto ExpectContents = [&](IBuffer* pSrc, const std::vector<Uint8>& Expected) {
+        pContext->CopyBuffer(pSrc, 0, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, pStaging, 0, SharedDesc.Size, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        pContext->WaitForIdle();
+
+        void* pData = nullptr;
+        pContext->MapBuffer(pStaging, MAP_READ, MAP_FLAG_DO_NOT_WAIT, pData);
+        ASSERT_NE(pData, nullptr);
+        EXPECT_EQ(std::memcmp(pData, Expected.data(), Expected.size()), 0);
+        pContext->UnmapBuffer(pStaging, MAP_READ);
+    };
+    const auto ReleaseToCommon = [&](IBuffer* pBuffer) {
+        StateTransitionDesc Barrier{pBuffer, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_COMMON, STATE_TRANSITION_FLAG_UPDATE_STATE};
+        pContext->TransitionResourceStates(1, &Barrier);
+        pContext->WaitForIdle();
+    };
+
+    // Created with data through the buffer, read through the opened handle
+    ReleaseToCommon(pShared);
+    ExpectContents(pImported, InitialData);
+    ReleaseToCommon(pImported);
+
+    // Written through the opened handle, read through the buffer
+    BufferDesc SrcDesc;
+    SrcDesc.Name  = "Source buffer";
+    SrcDesc.Size  = SharedDesc.Size;
+    SrcDesc.Usage = USAGE_IMMUTABLE;
+    const BufferData       SrcInit{CopiedData.data(), CopiedData.size()};
+    RefCntAutoPtr<IBuffer> pSrc;
+    pDevice->CreateBuffer(SrcDesc, &SrcInit, &pSrc);
+    ASSERT_NE(pSrc, nullptr);
+
+    pContext->CopyBuffer(pSrc, 0, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, pImported, 0, SharedDesc.Size, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    ReleaseToCommon(pImported);
+
+    pShared->SetState(RESOURCE_STATE_COMMON);
+    ExpectContents(pShared, CopiedData);
+}
 
 // The sharing path on one device: the handle is the same for a device on another adapter
 TEST(SharedCrossAdapterTexture, CopyThroughSharedHandle)

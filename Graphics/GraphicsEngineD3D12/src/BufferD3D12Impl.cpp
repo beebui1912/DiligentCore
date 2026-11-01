@@ -132,6 +132,10 @@ BufferD3D12Impl::BufferD3D12Impl(IReferenceCounters*        pRefCounters,
         if (!(m_Desc.BindFlags & BIND_SHADER_RESOURCE) && !(m_Desc.BindFlags & BIND_RAY_TRACING))
             d3d12BuffDesc.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
 
+        const bool IsSharedCrossAdapter = (m_Desc.MiscFlags & MISC_BUFFER_FLAG_SHARED_CROSS_ADAPTER) != 0;
+        if (IsSharedCrossAdapter)
+            d3d12BuffDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;
+
         ID3D12Device* pd3d12Device = pRenderDeviceD3D12->GetD3D12Device();
 
         if (m_Desc.Usage == USAGE_SPARSE)
@@ -192,11 +196,37 @@ BufferD3D12Impl::BufferD3D12Impl(IReferenceCounters*        pRefCounters,
                 D3D12_HEAP_FLAG_CREATE_NOT_ZEROED :
                 D3D12_HEAP_FLAG_NONE;
 
-            HRESULT hr = pd3d12Device->CreateCommittedResource(
-                &HeapProps, d3d12HeapFlags, &d3d12BuffDesc, d3d12State,
-                nullptr, // pOptimizedClearValue
-                __uuidof(m_pd3d12Resource),
-                reinterpret_cast<void**>(static_cast<ID3D12Resource**>(&m_pd3d12Resource)));
+            HRESULT hr = E_FAIL;
+            if (IsSharedCrossAdapter)
+            {
+                // Direct3D12 only allows 2D textures as committed cross-adapter resources:
+                // a buffer must be placed in an explicit shared heap.
+                const D3D12_RESOURCE_ALLOCATION_INFO AllocInfo = pd3d12Device->GetResourceAllocationInfo(0, 1, &d3d12BuffDesc);
+
+                D3D12_HEAP_DESC d3d12HeapDesc{};
+                d3d12HeapDesc.SizeInBytes = AllocInfo.SizeInBytes;
+                d3d12HeapDesc.Properties  = HeapProps;
+                d3d12HeapDesc.Alignment   = AllocInfo.Alignment;
+                d3d12HeapDesc.Flags       = D3D12_HEAP_FLAG_SHARED | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER;
+
+                hr = pd3d12Device->CreateHeap(&d3d12HeapDesc, __uuidof(m_pd3d12SharedHeap),
+                                              reinterpret_cast<void**>(static_cast<ID3D12Heap**>(&m_pd3d12SharedHeap)));
+                if (FAILED(hr))
+                    LOG_ERROR_AND_THROW("Failed to create the shared cross-adapter heap of buffer '", m_Desc.Name, "'");
+
+                hr = pd3d12Device->CreatePlacedResource(m_pd3d12SharedHeap, 0, &d3d12BuffDesc, d3d12State,
+                                                        nullptr, // pOptimizedClearValue
+                                                        __uuidof(m_pd3d12Resource),
+                                                        reinterpret_cast<void**>(static_cast<ID3D12Resource**>(&m_pd3d12Resource)));
+            }
+            else
+            {
+                hr = pd3d12Device->CreateCommittedResource(
+                    &HeapProps, d3d12HeapFlags, &d3d12BuffDesc, d3d12State,
+                    nullptr, // pOptimizedClearValue
+                    __uuidof(m_pd3d12Resource),
+                    reinterpret_cast<void**>(static_cast<ID3D12Resource**>(&m_pd3d12Resource)));
+            }
             if (FAILED(hr))
                 LOG_ERROR_AND_THROW("Failed to create D3D12 buffer");
 
