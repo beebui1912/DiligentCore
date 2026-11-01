@@ -117,6 +117,15 @@ DeviceFeaturesVk PhysicalDeviceFeaturesToDeviceFeaturesVk(const VulkanUtilities:
 
 SPARSE_TEXTURE_FLAGS VkSparseImageFormatFlagsToSparseTextureFlags(VkSparseImageFormatFlags Flags);
 
+/// Returns the sparse block size of a format in texels. Some implementations report
+/// VkSparseImageFormatProperties::imageGranularity of block-compressed formats in compressed
+/// blocks rather than in texels; SparseBlockSize (the size of a sparse block in bytes) is used
+/// to tell the two apart.
+VkExtent3D SparseImageGranularityToTexels(const VkExtent3D& Granularity,
+                                          TEXTURE_FORMAT    Format,
+                                          Uint32            SampleCount,
+                                          Uint64            SparseBlockSize);
+
 VkImageUsageFlags BindFlagsToVkImageUsage(BIND_FLAGS Flags, bool IsMemoryless, bool FragDensityMapInsteadOfShadingRate);
 
 SAMPLE_COUNT VkSampleCountFlagsToSampleCount(VkSampleCountFlags Flags);

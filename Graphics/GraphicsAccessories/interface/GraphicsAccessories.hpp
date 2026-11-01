@@ -490,6 +490,8 @@ const char* GetRenderDeviceTypeShortString(RENDER_DEVICE_TYPE DeviceType, bool C
 
 const char* GetAdapterTypeString(ADAPTER_TYPE AdapterType, bool bGetEnumString = false);
 
+const char* GetGpuModeString(GPU_MODE GpuMode, bool bGetEnumString = false);
+
 String GetPipelineResourceFlagsString(PIPELINE_RESOURCE_FLAGS Flags, bool GetFullName = false, const char* DelimiterString = "|");
 
 const char* GetShaderCodeVariableClassString(SHADER_CODE_VARIABLE_CLASS Class);

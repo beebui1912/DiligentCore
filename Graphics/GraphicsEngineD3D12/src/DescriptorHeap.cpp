@@ -417,7 +417,8 @@ GPUDescriptorHeap::GPUDescriptorHeap(IMemoryAllocator&           Allocator,
                                      Uint32                      NumDescriptorsInHeap,
                                      Uint32                      NumDynamicDescriptors,
                                      D3D12_DESCRIPTOR_HEAP_TYPE  Type,
-                                     D3D12_DESCRIPTOR_HEAP_FLAGS Flags) :
+                                     D3D12_DESCRIPTOR_HEAP_FLAGS Flags,
+                                     UINT                        NodeMask) :
     // clang-format off
     m_DeviceD3D12Impl{Device},
     m_HeapDesc
@@ -425,7 +426,7 @@ GPUDescriptorHeap::GPUDescriptorHeap(IMemoryAllocator&           Allocator,
         Type,
         NumDescriptorsInHeap + NumDynamicDescriptors,
         Flags,
-        1 // UINT NodeMask;
+        NodeMask
     },
     m_pd3d12DescriptorHeap
     {

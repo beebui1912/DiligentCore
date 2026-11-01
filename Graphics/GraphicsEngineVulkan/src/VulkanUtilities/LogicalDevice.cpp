@@ -25,6 +25,9 @@
  *  of the possibility of such damages.
  */
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <limits>
 #include "VulkanErrors.hpp"
 #include "VulkanUtilities/LogicalDevice.hpp"
@@ -34,26 +37,62 @@
 namespace VulkanUtilities
 {
 
+namespace
+{
+// volk exposes a single set of global Vulkan function pointers. The per-device optimization
+// (volkLoadDevice) rebinds those globals to one specific VkDevice, so it can only be used when a
+// single device is alive. This counter lets additional devices fall back to the instance-level
+// (trampolined) pointers so that multiple Vulkan devices can coexist (e.g. unlinked multi-GPU).
+std::atomic<int> g_LiveLogicalDeviceCount{0};
+} // namespace
+
 std::shared_ptr<LogicalDevice> LogicalDevice::Create(const CreateInfo& CI)
 {
     return std::shared_ptr<LogicalDevice>{new LogicalDevice{CI}};
 }
 
+uint32_t LogicalDevice::GetLiveDeviceCount()
+{
+    const int Count = g_LiveLogicalDeviceCount.load(std::memory_order_relaxed);
+    return Count > 0 ? static_cast<uint32_t>(Count) : 0u;
+}
+
 LogicalDevice::~LogicalDevice()
 {
     vkDestroyDevice(m_VkDevice, m_VkAllocator);
+    g_LiveLogicalDeviceCount.fetch_sub(1, std::memory_order_relaxed);
 }
 
 LogicalDevice::LogicalDevice(const CreateInfo& CI) :
     m_VkDevice{CI.vkDevice},
     m_VkAllocator{CI.vkAllocator},
     m_EnabledFeatures{CI.EnabledFeatures},
-    m_EnabledExtFeatures{CI.EnabledExtFeatures}
+    m_EnabledExtFeatures{CI.EnabledExtFeatures},
+    m_DeviceGroupSize{std::max(CI.DeviceGroupSize, 1u)},
+    m_MemoryProperties{CI.PhysDevice.GetMemoryProperties()}
 {
+    // Track the number of live logical devices. Every device is created with its own VkInstance, and
+    // volkLoadInstance() (called when the instance is created) loads every device-level entry point as
+    // a loader trampoline that dispatches correctly for any device, so all devices remain usable
+    // through the global pointers.
+    const bool IsSoleDevice = g_LiveLogicalDeviceCount.fetch_add(1, std::memory_order_relaxed) == 0;
 #if DILIGENT_USE_VOLK
-    // Since we only use one device at this time, load device function entries
+    // Load a dedicated per-device function-pointer table. Every Vulkan device gets its own table of
+    // device-optimized entry points, so multiple devices can be driven simultaneously without one
+    // clobbering another's pointers. Command recording (VulkanUtilities::CommandBuffer) uses this
+    // table; the other calls (queue submission included) use the global pointers.
+    volkLoadDeviceTable(&m_VkTable, m_VkDevice);
+
+    // volkLoadDevice() additionally rebinds the single set of GLOBAL pointers to this device, which
+    // optimizes the calls that are not routed through the per-device table. Because that makes the
+    // globals valid for this device only, we apply it exclusively when this is the single live
+    // device. When more than one device is alive, those calls use the trampolined global pointers
+    // loaded by volkLoadInstance(), which dispatch correctly for any device.
     // https://github.com/zeux/volk#optimizing-device-calls
-    volkLoadDevice(m_VkDevice);
+    if (IsSoleDevice)
+        volkLoadDevice(m_VkDevice);
+#else
+    (void)IsSoleDevice;
 #endif
 
     VkPipelineStageFlags GraphicsStages =
@@ -250,15 +289,123 @@ DeviceMemoryWrapper LogicalDevice::AllocateDeviceMemory(const VkMemoryAllocateIn
     if (DebugName == nullptr)
         DebugName = "";
 
+    const VkMemoryAllocateInfo* pAllocInfo = &AllocInfo;
+
+    // Linked multi-GPU: by default an allocation from a multi-instance heap has an instance on every
+    // device of the group, and such memory cannot be mapped (VUID-vkMapMemory-memory-00683). Host-visible
+    // memory of such a heap (e.g. device-local host-visible memory used by USAGE_UNIFIED buffers) is
+    // therefore allocated on device 0 only; BindBufferMemory()/BindImageMemory() then bind every device
+    // to that instance. Host-visible memory of an ordinary (single-instance) heap, which staging and
+    // dynamic buffers use, is not affected. Nothing changes for an ordinary device.
+    VkMemoryAllocateInfo      Device0AllocInfo;
+    VkMemoryAllocateFlagsInfo Device0FlagsInfo{};
+    bool                      IsDevice0Only = false;
+    if (m_DeviceGroupSize > 1 &&
+        AllocInfo.memoryTypeIndex < m_MemoryProperties.memoryTypeCount &&
+        (m_MemoryProperties.memoryTypes[AllocInfo.memoryTypeIndex].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 &&
+        IsMultiInstanceMemoryType(AllocInfo.memoryTypeIndex))
+    {
+        const VkMemoryAllocateFlagsInfo* pFlagsInfo = nullptr;
+        for (const VkBaseInStructure* pStruct = static_cast<const VkBaseInStructure*>(AllocInfo.pNext); pStruct != nullptr; pStruct = pStruct->pNext)
+        {
+            if (pStruct->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO)
+            {
+                pFlagsInfo = reinterpret_cast<const VkMemoryAllocateFlagsInfo*>(pStruct);
+                break;
+            }
+        }
+
+        if (pFlagsInfo != nullptr && (pFlagsInfo->flags & VK_MEMORY_ALLOCATE_DEVICE_MASK_BIT) != 0)
+        {
+            // The caller chose the devices; an allocation on exactly one device is single-instance
+            IsDevice0Only = pFlagsInfo->deviceMask == 1;
+        }
+        else if (pFlagsInfo == nullptr || pFlagsInfo == AllocInfo.pNext)
+        {
+            // The flags structure is the first one in the chain or there is none: put a copy with
+            // the device mask in its place (the chain is const).
+            if (pFlagsInfo != nullptr)
+            {
+                Device0FlagsInfo = *pFlagsInfo;
+            }
+            else
+            {
+                Device0FlagsInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+                Device0FlagsInfo.pNext = AllocInfo.pNext;
+            }
+            Device0FlagsInfo.flags |= VK_MEMORY_ALLOCATE_DEVICE_MASK_BIT;
+            Device0FlagsInfo.deviceMask = 1;
+
+            Device0AllocInfo       = AllocInfo;
+            Device0AllocInfo.pNext = &Device0FlagsInfo;
+            pAllocInfo             = &Device0AllocInfo;
+            IsDevice0Only          = true;
+        }
+        else
+        {
+            LOG_WARNING_MESSAGE("Host-visible memory '", DebugName, "' of a multi-instance heap is allocated on every device of the group "
+                                "and can not be mapped: VkMemoryAllocateFlagsInfo is not the first structure of the pNext chain");
+        }
+    }
+
     VkDeviceMemory vkDeviceMem = VK_NULL_HANDLE;
 
-    VkResult err = vkAllocateMemory(m_VkDevice, &AllocInfo, m_VkAllocator, &vkDeviceMem);
+    VkResult err = vkAllocateMemory(m_VkDevice, pAllocInfo, m_VkAllocator, &vkDeviceMem);
     CHECK_VK_ERROR_AND_THROW(err, "Failed to allocate device memory '", DebugName, '\'');
 
     if (*DebugName != 0)
         SetDeviceMemoryName(m_VkDevice, vkDeviceMem, DebugName);
 
+    if (IsDevice0Only)
+    {
+        std::lock_guard<std::mutex> Lock{m_Device0OnlyMemoryMtx};
+        m_Device0OnlyMemory.insert(vkDeviceMem);
+    }
+
     return DeviceMemoryWrapper{GetSharedPtr(), std::move(vkDeviceMem)};
+}
+
+bool LogicalDevice::IsDevice0OnlyMemory(VkDeviceMemory Memory) const
+{
+    if (m_DeviceGroupSize <= 1)
+        return false;
+
+    std::lock_guard<std::mutex> Lock{m_Device0OnlyMemoryMtx};
+    return m_Device0OnlyMemory.find(Memory) != m_Device0OnlyMemory.end();
+}
+
+bool LogicalDevice::IsMultiInstanceMemoryType(uint32_t MemoryTypeIndex) const
+{
+    if (m_DeviceGroupSize <= 1 || MemoryTypeIndex >= m_MemoryProperties.memoryTypeCount)
+        return false;
+
+    const uint32_t HeapIndex = m_MemoryProperties.memoryTypes[MemoryTypeIndex].heapIndex;
+    return HeapIndex < m_MemoryProperties.memoryHeapCount &&
+        (m_MemoryProperties.memoryHeaps[HeapIndex].flags & VK_MEMORY_HEAP_MULTI_INSTANCE_BIT) != 0;
+}
+
+VkPeerMemoryFeatureFlags LogicalDevice::GetPeerMemoryFeatures(uint32_t MemoryTypeIndex, uint32_t LocalDeviceIndex, uint32_t RemoteDeviceIndex) const
+{
+    VkPeerMemoryFeatureFlags Features = 0;
+#if DILIGENT_USE_VOLK
+    if (m_DeviceGroupSize > 1 &&
+        MemoryTypeIndex < m_MemoryProperties.memoryTypeCount &&
+        LocalDeviceIndex < m_DeviceGroupSize &&
+        RemoteDeviceIndex < m_DeviceGroupSize &&
+        LocalDeviceIndex != RemoteDeviceIndex)
+    {
+        const uint32_t HeapIndex = m_MemoryProperties.memoryTypes[MemoryTypeIndex].heapIndex;
+        if (vkGetDeviceGroupPeerMemoryFeatures != nullptr)
+            vkGetDeviceGroupPeerMemoryFeatures(m_VkDevice, HeapIndex, LocalDeviceIndex, RemoteDeviceIndex, &Features);
+        else if (vkGetDeviceGroupPeerMemoryFeaturesKHR != nullptr)
+            vkGetDeviceGroupPeerMemoryFeaturesKHR(m_VkDevice, HeapIndex, LocalDeviceIndex, RemoteDeviceIndex, &Features);
+    }
+#else
+    (void)MemoryTypeIndex;
+    (void)LocalDeviceIndex;
+    (void)RemoteDeviceIndex;
+#endif
+    return Features;
 }
 
 PipelineWrapper LogicalDevice::CreateComputePipeline(const VkComputePipelineCreateInfo& PipelineCI,
@@ -488,6 +635,11 @@ void LogicalDevice::ReleaseVulkanObject(RenderPassWrapper&& RenderPass) const
 
 void LogicalDevice::ReleaseVulkanObject(DeviceMemoryWrapper&& Memory) const
 {
+    if (m_DeviceGroupSize > 1)
+    {
+        std::lock_guard<std::mutex> Lock{m_Device0OnlyMemoryMtx};
+        m_Device0OnlyMemory.erase(Memory.m_VkObject);
+    }
     vkFreeMemory(m_VkDevice, Memory.m_VkObject, m_VkAllocator);
     Memory.m_VkObject = VK_NULL_HANDLE;
 }
@@ -586,11 +738,83 @@ VkMemoryRequirements LogicalDevice::GetImageMemoryRequirements(VkImage vkImage) 
 
 VkResult LogicalDevice::BindBufferMemory(VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset) const
 {
-    return vkBindBufferMemory(m_VkDevice, buffer, memory, memoryOffset);
+    return BindBufferMemory(buffer, memory, memoryOffset, nullptr);
 }
 
 VkResult LogicalDevice::BindImageMemory(VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset) const
 {
+    return BindImageMemory(image, memory, memoryOffset, nullptr);
+}
+
+VkResult LogicalDevice::BindBufferMemory(VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset, const uint32_t* pDeviceIndices) const
+{
+    if (m_DeviceGroupSize <= 1)
+        return vkBindBufferMemory(m_VkDevice, buffer, memory, memoryOffset);
+
+    // Memory that only has an instance on device 0 is used by every device
+    std::array<uint32_t, VK_MAX_DEVICE_GROUP_SIZE> Device0Indices{};
+    if (IsDevice0OnlyMemory(memory))
+        pDeviceIndices = Device0Indices.data();
+
+    if (pDeviceIndices == nullptr)
+        return vkBindBufferMemory(m_VkDevice, buffer, memory, memoryOffset);
+
+#if DILIGENT_USE_VOLK
+    VkBindBufferMemoryDeviceGroupInfo DeviceGroupInfo{};
+    DeviceGroupInfo.sType            = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_DEVICE_GROUP_INFO;
+    DeviceGroupInfo.deviceIndexCount = m_DeviceGroupSize;
+    DeviceGroupInfo.pDeviceIndices   = pDeviceIndices;
+
+    VkBindBufferMemoryInfo BindInfo{};
+    BindInfo.sType        = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO;
+    BindInfo.pNext        = &DeviceGroupInfo;
+    BindInfo.buffer       = buffer;
+    BindInfo.memory       = memory;
+    BindInfo.memoryOffset = memoryOffset;
+
+    if (vkBindBufferMemory2 != nullptr)
+        return vkBindBufferMemory2(m_VkDevice, 1, &BindInfo);
+    if (vkBindBufferMemory2KHR != nullptr)
+        return vkBindBufferMemory2KHR(m_VkDevice, 1, &BindInfo);
+#endif
+
+    LOG_ERROR_MESSAGE("vkBindBufferMemory2 is not available: the buffer is bound to each device's own instance of the memory");
+    return vkBindBufferMemory(m_VkDevice, buffer, memory, memoryOffset);
+}
+
+VkResult LogicalDevice::BindImageMemory(VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset, const uint32_t* pDeviceIndices) const
+{
+    if (m_DeviceGroupSize <= 1)
+        return vkBindImageMemory(m_VkDevice, image, memory, memoryOffset);
+
+    // Memory that only has an instance on device 0 is used by every device
+    std::array<uint32_t, VK_MAX_DEVICE_GROUP_SIZE> Device0Indices{};
+    if (IsDevice0OnlyMemory(memory))
+        pDeviceIndices = Device0Indices.data();
+
+    if (pDeviceIndices == nullptr)
+        return vkBindImageMemory(m_VkDevice, image, memory, memoryOffset);
+
+#if DILIGENT_USE_VOLK
+    VkBindImageMemoryDeviceGroupInfo DeviceGroupInfo{};
+    DeviceGroupInfo.sType            = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_DEVICE_GROUP_INFO;
+    DeviceGroupInfo.deviceIndexCount = m_DeviceGroupSize;
+    DeviceGroupInfo.pDeviceIndices   = pDeviceIndices;
+
+    VkBindImageMemoryInfo BindInfo{};
+    BindInfo.sType        = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO;
+    BindInfo.pNext        = &DeviceGroupInfo;
+    BindInfo.image        = image;
+    BindInfo.memory       = memory;
+    BindInfo.memoryOffset = memoryOffset;
+
+    if (vkBindImageMemory2 != nullptr)
+        return vkBindImageMemory2(m_VkDevice, 1, &BindInfo);
+    if (vkBindImageMemory2KHR != nullptr)
+        return vkBindImageMemory2KHR(m_VkDevice, 1, &BindInfo);
+#endif
+
+    LOG_ERROR_MESSAGE("vkBindImageMemory2 is not available: the image is bound to each device's own instance of the memory");
     return vkBindImageMemory(m_VkDevice, image, memory, memoryOffset);
 }
 

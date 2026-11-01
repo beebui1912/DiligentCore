@@ -456,7 +456,12 @@ private:
         m_State.NumCommands = m_State.NumCommands != 0 ? m_State.NumCommands : 1;
         if (m_CommandBuffer.GetVkCmdBuffer() == VK_NULL_HANDLE)
         {
-            VkCommandBuffer vkCmdBuff = m_CmdPool->GetCommandBuffer();
+            // Linked multi-GPU (VK_KHR_device_group): the command buffer's initial device mask is
+            // stamped at begin (VkDeviceGroupCommandBufferBeginInfo) via m_CmdBufferDeviceMask: the node
+            // of an immediate context, every device of the group for a deferred context.
+            // m_CmdBufferDeviceMask is 0 when the device is not a group, in which case nothing is chained
+            // and behavior is identical to the non-mGPU path.
+            VkCommandBuffer vkCmdBuff = m_CmdPool->GetCommandBuffer("", m_CmdBufferDeviceMask);
             m_CommandBuffer.SetVkCmdBuffer(vkCmdBuff, m_CmdPool->GetSupportedStagesMask(), m_CmdPool->GetSupportedAccessMask());
         }
     }
@@ -500,6 +505,17 @@ private:
 
 private:
     VulkanUtilities::CommandBuffer m_CommandBuffer;
+
+    // Linked multi-GPU (VK_KHR_device_group) begin-time device mask for command buffers recorded by
+    // this context (1u << NodeIndex for an immediate context, all devices for a deferred one). Zero when
+    // the device is not a device group, in which case nothing is chained and behavior matches the
+    // legacy path. Set once in the constructor.
+    Uint32 m_CmdBufferDeviceMask = 0;
+
+#ifdef DILIGENT_DEVELOPMENT
+    // Linked multi-GPU: this immediate context shares its VkQueue with a context on another node
+    bool m_DvpVkQueueIsShared = false;
+#endif
 
     struct ContextState
     {

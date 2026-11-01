@@ -57,20 +57,32 @@ void VerifyEngineCreateInfo(const EngineCreateInfo& EngineCI, const GraphicsAdap
         LOG_ERROR_AND_THROW("NumImmediateContexts (", EngineCI.NumImmediateContexts, ") must be less than ", MaxImmediateContexts, "");
     }
 
-    std::array<Uint32, DILIGENT_MAX_ADAPTER_QUEUES> QueueCount = {};
+    // Linked mode: a hardware queue runs work on any node, so contexts on different nodes can share
+    // one and the limit applies to the contexts of each node. NodeIndex is ignored in the other modes.
+    const bool       PerNodeLimit = EngineCI.GpuMode == GPU_MODE_LINKED && AdapterInfo.NodeCount > 1;
+    constexpr Uint32 MaxNodes     = 32; // VK_MAX_DEVICE_GROUP_SIZE
+
+    std::array<std::array<Uint32, MaxNodes>, DILIGENT_MAX_ADAPTER_QUEUES> QueueCount = {};
     for (Uint32 CtxInd = 0; CtxInd < EngineCI.NumImmediateContexts; ++CtxInd)
     {
         const ImmediateContextCreateInfo& ContextInfo = EngineCI.pImmediateContextInfo[CtxInd];
 
         if (ContextInfo.QueueId >= AdapterInfo.NumQueues)
         {
-            LOG_ERROR_AND_THROW("pContextInfo[", CtxInd, "].QueueId (", ContextInfo.QueueId, ") must be less than AdapterInfo.NumQueues (",
+            LOG_ERROR_AND_THROW("pContextInfo[", CtxInd, "].QueueId (", Uint32{ContextInfo.QueueId}, ") must be less than AdapterInfo.NumQueues (",
                                 AdapterInfo.NumQueues, ").");
         }
-        QueueCount[ContextInfo.QueueId] += 1;
-        if (QueueCount[ContextInfo.QueueId] > AdapterInfo.Queues[ContextInfo.QueueId].MaxDeviceContexts)
+        if (PerNodeLimit && (ContextInfo.NodeIndex >= AdapterInfo.NodeCount || ContextInfo.NodeIndex >= MaxNodes))
         {
-            LOG_ERROR_AND_THROW("pContextInfo[", CtxInd, "]: the number of contexts with QueueId ", ContextInfo.QueueId,
+            LOG_ERROR_AND_THROW("pContextInfo[", CtxInd, "].NodeIndex (", Uint32{ContextInfo.NodeIndex}, ") must be less than AdapterInfo.NodeCount (",
+                                AdapterInfo.NodeCount, ").");
+        }
+        const Uint32 Node = PerNodeLimit ? ContextInfo.NodeIndex : 0;
+        QueueCount[ContextInfo.QueueId][Node] += 1;
+        if (QueueCount[ContextInfo.QueueId][Node] > AdapterInfo.Queues[ContextInfo.QueueId].MaxDeviceContexts)
+        {
+            LOG_ERROR_AND_THROW("pContextInfo[", CtxInd, "]: the number of contexts with QueueId ", Uint32{ContextInfo.QueueId},
+                                PerNodeLimit ? " on one node" : "",
                                 " exceeds the maximum available number ", AdapterInfo.Queues[ContextInfo.QueueId].MaxDeviceContexts, ".");
         }
 

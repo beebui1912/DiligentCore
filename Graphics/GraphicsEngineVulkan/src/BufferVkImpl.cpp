@@ -314,7 +314,12 @@ BufferVkImpl::BufferVkImpl(IReferenceCounters*        pRefCounters,
         m_BufferMemoryAlignedOffset = AlignUp(VkDeviceSize{m_MemoryAllocation.UnalignedOffset}, RequiredAlignment);
         VERIFY(m_MemoryAllocation.Size >= MemReqs.size + (m_BufferMemoryAlignedOffset - m_MemoryAllocation.UnalignedOffset), "Size of memory allocation is too small");
         VkDeviceMemory Memory = m_MemoryAllocation.Page->GetVkMemory();
-        VkResult       err    = LogicalDevice.BindBufferMemory(m_VulkanBuffer, Memory, m_BufferMemoryAlignedOffset);
+
+        // Linked multi-GPU: nodes in VisibleNodeMask use the creation node's instance of the memory
+        std::array<uint32_t, VK_MAX_DEVICE_GROUP_SIZE> PeerDeviceIndices{};
+        const bool                                     PeerBinding = pRenderDeviceVk->GetPeerBindingDeviceIndices(m_Desc.CreationNodeMask, m_Desc.VisibleNodeMask, MemoryTypeIndex, m_Desc.Name, PeerDeviceIndices);
+
+        VkResult err = LogicalDevice.BindBufferMemory(m_VulkanBuffer, Memory, m_BufferMemoryAlignedOffset, PeerBinding ? PeerDeviceIndices.data() : nullptr);
         CHECK_VK_ERROR_AND_THROW(err, "Failed to bind buffer memory");
 
         VERIFY(!AlignToNonCoherentAtomSize || (m_BufferMemoryAlignedOffset + MemReqs.size) % DeviceLimits.nonCoherentAtomSize == 0, "End offset is not properly aligned");
@@ -407,7 +412,10 @@ BufferVkImpl::BufferVkImpl(IReferenceCounters*        pRefCounters,
                 BuffCopy.size      = VkBuffCI.size;
                 CmdBuffer.CopyBuffer(StagingBuffer, m_VulkanBuffer, 1, &BuffCopy);
 
-                pRenderDeviceVk->ExecuteAndDisposeTransientCmdBuff(CmdQueueInd, CmdBuffer.GetVkCmdBuffer(), std::move(CmdPool));
+                // Linked multi-GPU: write the data to every instance of the memory that the resource uses
+                // (the staging buffer is host memory with a single instance, which every device can read)
+                const uint32_t InitDeviceMask = pRenderDeviceVk->GetInitialDataDeviceMask(m_Desc.CreationNodeMask, m_Desc.VisibleNodeMask, MemoryTypeIndex);
+                pRenderDeviceVk->ExecuteAndDisposeTransientCmdBuff(CmdQueueInd, CmdBuffer.GetVkCmdBuffer(), std::move(CmdPool), InitDeviceMask);
 
 
                 // After command buffer is submitted, safe-release staging resources. This strategy

@@ -73,7 +73,17 @@ DILIGENT_TYPED_ENUM(MISC_TEXTURE_FLAGS, Uint8)
     /// Requires SHADING_RATE_CAP_FLAG_SUBSAMPLED_RENDER_TARGET capability.
     /// 
     /// \note  Copy operations are not supported for subsampled textures.
-    MISC_TEXTURE_FLAG_SUBSAMPLED      = 1u << 3
+    MISC_TEXTURE_FLAG_SUBSAMPLED      = 1u << 3,
+
+    /// Direct3D12 only: the texture can be shared with a device on another adapter (unlinked multi-GPU).
+    /// It uses the row-major layout and a shared cross-adapter heap, which requires
+    /// D3D12_FEATURE_DATA_D3D12_OPTIONS::CrossAdapterRowMajorTextureSupported.
+    /// It must be a USAGE_DEFAULT 2D texture with one mip level and no depth-stencil binding.
+    ///
+    /// \note  To share it, call ID3D12Device::CreateSharedHandle() for the resource returned by
+    ///        ITextureD3D12::GetD3D12Texture(), then ID3D12Device::OpenSharedHandle() and
+    ///        IRenderDeviceD3D12::CreateTextureFromD3DResource() on the other device.
+    MISC_TEXTURE_FLAG_SHARED_CROSS_ADAPTER = 1u << 4
 };
 DEFINE_FLAG_ENUM_OPERATORS(MISC_TEXTURE_FLAGS)
 
@@ -149,6 +159,25 @@ struct TextureDesc DILIGENT_DERIVE(DeviceObjectAttribs)
     ///             will actually be used. Do not set unnecessary bits as this will result in extra overhead.
     Uint64 ImmediateContextMask         DEFAULT_INITIALIZER(1);
 
+    /// Bitmask identifying the GPU node where physical memory will be allocated (0 = default node 0).
+
+    /// Linked multi-GPU only (ignored otherwise); exactly one bit.
+    /// * Direct3D12: the heap's creation node.
+    /// * Vulkan (device group): if this mask or VisibleNodeMask is set, the texture lives in this node's
+    ///   instance of the memory. If both are 0, every node keeps its own copy of the texture, and the
+    ///   initial data is written to every copy. The resource state is tracked once per texture, not per
+    ///   copy, so such a texture must be used on one node, or with explicit transitions: to use a texture
+    ///   on several nodes, set these masks or create a texture per node.
+    Uint32 CreationNodeMask             DEFAULT_INITIALIZER(0);
+
+    /// Bitmask identifying GPU nodes that can access this resource (0 = the creation node only).
+
+    /// Linked multi-GPU only (ignored otherwise).
+    /// * Direct3D12: the heap's visible nodes. Nodes other than the creation node require cross-node sharing.
+    /// * Vulkan (device group): the other nodes in the mask use the creation node's memory (peer memory).
+    ///   Which accesses they can make depends on the peer memory features the device reports.
+    Uint32 VisibleNodeMask              DEFAULT_INITIALIZER(0);
+
 
 #if DILIGENT_CPP_INTERFACE && !defined(DILIGENT_SHARP_GEN)
     constexpr TextureDesc() noexcept {}
@@ -166,7 +195,9 @@ struct TextureDesc DILIGENT_DERIVE(DeviceObjectAttribs)
                           CPU_ACCESS_FLAGS    _CPUAccessFlags       = TextureDesc{}.CPUAccessFlags,
                           MISC_TEXTURE_FLAGS  _MiscFlags            = TextureDesc{}.MiscFlags,
                           OptimizedClearValue _ClearValue           = TextureDesc{}.ClearValue,
-                          Uint64              _ImmediateContextMask = TextureDesc{}.ImmediateContextMask) noexcept :
+                          Uint64              _ImmediateContextMask = TextureDesc{}.ImmediateContextMask,
+                          Uint32              _CreationNodeMask     = TextureDesc{}.CreationNodeMask,
+                          Uint32              _VisibleNodeMask      = TextureDesc{}.VisibleNodeMask) noexcept :
         DeviceObjectAttribs  {_Name            },
         Type                 {_Type            },
         Width                {_Width           },
@@ -180,7 +211,9 @@ struct TextureDesc DILIGENT_DERIVE(DeviceObjectAttribs)
         CPUAccessFlags       {_CPUAccessFlags  },
         MiscFlags            {_MiscFlags       },
         ClearValue           {_ClearValue      },
-        ImmediateContextMask {_ImmediateContextMask}
+        ImmediateContextMask {_ImmediateContextMask},
+        CreationNodeMask     {_CreationNodeMask},
+        VisibleNodeMask      {_VisibleNodeMask }
     {}
 
     constexpr Uint32 ArraySizeOrDepth() const { return ArraySize; }
@@ -211,7 +244,9 @@ struct TextureDesc DILIGENT_DERIVE(DeviceObjectAttribs)
                 CPUAccessFlags       == RHS.CPUAccessFlags &&
                 MiscFlags            == RHS.MiscFlags      &&
                 ClearValue           == RHS.ClearValue     &&
-                ImmediateContextMask == RHS.ImmediateContextMask;
+                ImmediateContextMask == RHS.ImmediateContextMask &&
+                CreationNodeMask     == RHS.CreationNodeMask     &&
+                VisibleNodeMask      == RHS.VisibleNodeMask;
     }
 
     constexpr bool IsArray() const

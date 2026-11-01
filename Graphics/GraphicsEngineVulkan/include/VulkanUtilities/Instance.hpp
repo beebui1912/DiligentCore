@@ -65,6 +65,11 @@ public:
         uint32_t               IgnoreDebugMessageCount   = 0;
         const char* const*     ppIgnoreDebugMessageNames = nullptr;
 
+        // Whether the instance also (re)loads volk's global device-level function pointers. An instance
+        // that never creates a device (adapter enumeration) sets this to false so that the pointers a live
+        // device uses are not replaced by loader trampolines.
+        bool LoadDeviceFunctions = true;
+
         struct OpenXRInfo
         {
             uint64_t Instance            = 0;

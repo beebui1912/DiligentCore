@@ -1350,6 +1350,27 @@ DILIGENT_TYPED_ENUM(ADAPTER_TYPE, Uint8)
     ADAPTER_TYPE_COUNT
 };
 
+/// Multi-GPU execution mode
+DILIGENT_TYPED_ENUM(GPU_MODE, Uint8)
+{
+    /// Single GPU mode (default). Node masks are set to default node.
+    GPU_MODE_SINGLE = 0,
+
+    /// Linked Multi-GPU (LDA / Device Group). Single logical device managing multiple identical GPU nodes.
+    GPU_MODE_LINKED,
+
+    /// Unlinked Multi-GPU. Multiple independent physical devices managed explicitly.
+    GPU_MODE_UNLINKED,
+
+    /// The total number of GPU modes in the enumeration
+    GPU_MODE_COUNT
+};
+
+/// Maximum number of linked GPU nodes supported (matches D3D12's max of 32 bits in NodeMask,
+/// but limited to a practical value for array sizing).
+#define DILIGENT_MAX_LINKED_GPU_NODES 4u
+
+
 
 /// Flags indicating how an image is stretched to fit a given monitor's resolution.
 /// \sa <a href = "https://docs.microsoft.com/en-us/previous-versions/windows/desktop/legacy/bb173066(v=vs.85)">DXGI_MODE_SCALING enumeration on MSDN</a>,
@@ -1516,6 +1537,22 @@ struct SwapChainDesc
     /// Indicates if this is a primary swap chain. When Present() is called
     /// for the primary swap chain, the engine releases stale resources.
     Bool  IsPrimary                     DEFAULT_INITIALIZER(true);
+
+    /// Linked multi-GPU, Direct3D12 only: a bit mask of the immediate contexts (as in
+    /// BufferDesc::ImmediateContextMask) that render and present the back buffers in turn
+    /// (alternate frame rendering).
+    ///
+    /// Every context must use a graphics queue on a different node, the mask must include the
+    /// context the swap chain is created with, and BufferCount must not be less than the number
+    /// of contexts. Back buffer N is on the node of context (N % number of contexts) of the mask.
+    /// Use the current back buffer's TextureDesc::ImmediateContextMask to find the context that
+    /// must render to it. ISwapChain::GetDepthBufferDSV() returns a depth buffer on the same node,
+    /// and ISwapChain::Present() flushes that context.
+    ///
+    /// Default value is 0: all back buffers are on the node of the context the swap chain is
+    /// created with. The member is reset to 0 if the device does not use linked nodes or the
+    /// backend does not support this mode.
+    Uint64 AlternateFrameContextMask    DEFAULT_INITIALIZER(0);
 
 #if DILIGENT_CPP_INTERFACE
     constexpr SwapChainDesc() noexcept
@@ -3387,6 +3424,12 @@ struct GraphicsAdapterInfo
     ///   - Optional - the feature is supported and can be enabled or disabled.
     DeviceFeatures Features;
 
+    /// Number of physical GPU nodes linked under this adapter (1 for single GPU, > 1 for LDA / Device Group).
+    Uint32 NodeCount DEFAULT_INITIALIZER(1);
+
+    /// Bitmask of all valid nodes in this adapter (e.g. 0x3 for 2 nodes, 0x1 for 1 node).
+    Uint32 NodeMask DEFAULT_INITIALIZER(1);
+
     /// An array of NumQueues command queues supported by this device. See Diligent::CommandQueueInfo.
     CommandQueueInfo  Queues[DILIGENT_MAX_ADAPTER_QUEUES]  DEFAULT_INITIALIZER({});
 
@@ -3414,6 +3457,8 @@ struct GraphicsAdapterInfo
                VendorId        == RHS.VendorId        &&
                DeviceId        == RHS.DeviceId        &&
                NumOutputs      == RHS.NumOutputs      &&
+               NodeCount       == RHS.NodeCount       &&
+               NodeMask        == RHS.NodeMask        &&
                Memory          == RHS.Memory          &&
                RayTracing      == RHS.RayTracing      &&
                WaveOp          == RHS.WaveOp          &&
@@ -3446,6 +3491,11 @@ struct ImmediateContextCreateInfo
     /// hardware queue with id QueueId. The total number of contexts created for
     /// this queue must not exceed the value of MaxDeviceContexts member of CommandQueueInfo
     /// for this queue.
+    ///
+    /// In GPU_MODE_LINKED the limit applies to the contexts of each node. On Vulkan, contexts
+    /// on different nodes share a VkQueue when the queue family has too few queues. Such a
+    /// context can not wait for a fence value that a context sharing its VkQueue has not
+    /// submitted yet: the wait blocks the VkQueue, and with it the signal. Signal and flush first.
     Uint8          QueueId      DEFAULT_INITIALIZER(DEFAULT_QUEUE_ID);
 
     /// Priority of the software queue created by the context, see Diligent::QUEUE_PRIORITY.
@@ -3455,15 +3505,20 @@ struct ImmediateContextCreateInfo
     /// * Other backends:     queue priority is ignored.
     QUEUE_PRIORITY Priority     DEFAULT_INITIALIZER(QUEUE_PRIORITY_MEDIUM);
 
+    /// Target GPU Node index in Linked Multi-GPU mode (0-based).
+    Uint8          NodeIndex    DEFAULT_INITIALIZER(0);
+
 #if DILIGENT_CPP_INTERFACE
     constexpr ImmediateContextCreateInfo() noexcept {}
 
     constexpr ImmediateContextCreateInfo(const Char*    _Name,
                                          Uint8          _QueueId,
-                                         QUEUE_PRIORITY _Priority = ImmediateContextCreateInfo{}.Priority) noexcept :
-        Name    {_Name},
-        QueueId {_QueueId},
-        Priority{_Priority}
+                                         QUEUE_PRIORITY _Priority  = ImmediateContextCreateInfo{}.Priority,
+                                         Uint8          _NodeIndex = ImmediateContextCreateInfo{}.NodeIndex) noexcept :
+        Name     {_Name},
+        QueueId  {_QueueId},
+        Priority {_Priority},
+        NodeIndex{_NodeIndex}
     {}
 #endif
 };
@@ -3577,8 +3632,14 @@ struct EngineCreateInfo
     /// function.
     Uint32 NumAsyncShaderCompilationThreads DEFAULT_INITIALIZER(0xFFFFFFFFu);
 
+    /// Multi-GPU operation mode (defaults to GPU_MODE_SINGLE).
+    GPU_MODE GpuMode DEFAULT_INITIALIZER(GPU_MODE_SINGLE);
+
+    /// For GPU_MODE_LINKED: requested number of linked nodes (0 = use all available nodes).
+    Uint8 NodeCount DEFAULT_INITIALIZER(0);
+
     // The structure must be 8-byte aligned
-    Uint32 Padding DEFAULT_INITIALIZER(0);
+    Uint16 Padding DEFAULT_INITIALIZER(0);
 
     /// An optional pointer to the OpenXR attributes, must be set if OpenXR is used.
     /// See Diligent::OpenXRAttribs.

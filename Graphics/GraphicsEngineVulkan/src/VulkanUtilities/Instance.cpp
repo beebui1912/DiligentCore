@@ -422,6 +422,13 @@ Instance::Instance(const CreateInfo& CI) :
         InstanceExtensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
     }
 
+    // VK_KHR_device_group_creation: enables enumeration of physical device groups for linked multi-GPU.
+    // Promoted to core in Vulkan 1.1, but needed as extension for 1.0 instances.
+    if (IsExtensionAvailable(VK_KHR_DEVICE_GROUP_CREATION_EXTENSION_NAME))
+    {
+        InstanceExtensions.push_back(VK_KHR_DEVICE_GROUP_CREATION_EXTENSION_NAME);
+    }
+
     for (const char* ExtName : InstanceExtensions)
     {
         if (!IsExtensionAvailable(ExtName))
@@ -619,7 +626,10 @@ Instance::Instance(const CreateInfo& CI) :
     CHECK_VK_ERROR_AND_THROW(res, "Failed to create Vulkan instance");
 
 #if DILIGENT_USE_VOLK
-    volkLoadInstance(m_vkInstance);
+    if (CI.LoadDeviceFunctions)
+        volkLoadInstance(m_vkInstance);
+    else
+        volkLoadInstanceOnly(m_vkInstance);
 #endif
 
     m_EnabledExtensions = std::move(InstanceExtensions);

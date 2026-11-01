@@ -1278,13 +1278,20 @@ void RayTracingMultiGeometryReferenceVk(ISwapChain* pSwapChain)
         static_assert(_countof(BuildRanges) == _countof(Geometries), "size mismatch");
         static_assert(GeometryCount == _countof(Geometries), "size mismatch");
 
+        // All geometries share one vertex buffer (vertexData starts at vertex 0) and index into it, so
+        // maxVertex (the highest vertex index the indices may address) is the last vertex of the buffer for
+        // every geometry, not the geometry's own primitive count * 3 - 1: geometry 2 uses vertex 9 and
+        // geometry 3 uses vertices 12-15. Implementations may drop vertices above maxVertex (seen on Intel Arc).
+        // The D3D12 reference sets VertexCount = _countof(Vertices) for the same reason.
+        const uint32_t MaxVertex = static_cast<uint32_t>(_countof(Vertices)) - 1;
+
         Geometries[0].sType                           = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
         Geometries[0].flags                           = VK_GEOMETRY_OPAQUE_BIT_KHR;
         Geometries[0].geometryType                    = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
         Geometries[0].geometry.triangles.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
         Geometries[0].geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
         Geometries[0].geometry.triangles.vertexStride = sizeof(Vertices[0]);
-        Geometries[0].geometry.triangles.maxVertex    = PrimitiveOffsets[1] * 3 - 1;
+        Geometries[0].geometry.triangles.maxVertex    = MaxVertex;
         Geometries[0].geometry.triangles.indexType    = VK_INDEX_TYPE_UINT32;
 
         Geometries[1].sType                           = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
@@ -1293,7 +1300,7 @@ void RayTracingMultiGeometryReferenceVk(ISwapChain* pSwapChain)
         Geometries[1].geometry.triangles.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
         Geometries[1].geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
         Geometries[1].geometry.triangles.vertexStride = sizeof(Vertices[0]);
-        Geometries[1].geometry.triangles.maxVertex    = (PrimitiveOffsets[2] - PrimitiveOffsets[1]) * 3 - 1;
+        Geometries[1].geometry.triangles.maxVertex    = MaxVertex;
         Geometries[1].geometry.triangles.indexType    = VK_INDEX_TYPE_UINT32;
 
         Geometries[2].sType                           = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
@@ -1302,7 +1309,7 @@ void RayTracingMultiGeometryReferenceVk(ISwapChain* pSwapChain)
         Geometries[2].geometry.triangles.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
         Geometries[2].geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
         Geometries[2].geometry.triangles.vertexStride = sizeof(Vertices[0]);
-        Geometries[2].geometry.triangles.maxVertex    = (_countof(Primitives) - PrimitiveOffsets[2]) * 3 - 1;
+        Geometries[2].geometry.triangles.maxVertex    = MaxVertex;
         Geometries[2].geometry.triangles.indexType    = VK_INDEX_TYPE_UINT32;
 
         BuildRanges[0].primitiveCount = PrimitiveOffsets[1];

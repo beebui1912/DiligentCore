@@ -66,7 +66,7 @@ CommandBufferPool::~CommandBufferPool()
     m_CmdPool.Release();
 }
 
-VkCommandBuffer CommandBufferPool::GetCommandBuffer(const char* DebugName)
+VkCommandBuffer CommandBufferPool::GetCommandBuffer(const char* DebugName, uint32_t DeviceMask)
 {
     VkCommandBuffer CmdBuffer = VK_NULL_HANDLE;
 
@@ -110,6 +110,19 @@ VkCommandBuffer CommandBufferPool::GetCommandBuffer(const char* DebugName)
                                                                           // submitted once, and the command buffer will be reset
                                                                           // and recorded again between each submission.
     CmdBuffBeginInfo.pInheritanceInfo = nullptr;                          // Ignored for a primary command buffer
+
+    // Linked multi-GPU (VK_KHR_device_group): stamp the command buffer's initial device mask so that
+    // all recorded commands (draws, dispatches, acceleration-structure builds, ray tracing) execute on
+    // the intended GPU node. Only chained when a non-zero mask is requested (linked mode); left absent
+    // for single-GPU/unlinked, where the default (all devices) preserves the legacy behavior.
+    VkDeviceGroupCommandBufferBeginInfo DeviceGroupBeginInfo{};
+    if (DeviceMask != 0)
+    {
+        DeviceGroupBeginInfo.sType      = VK_STRUCTURE_TYPE_DEVICE_GROUP_COMMAND_BUFFER_BEGIN_INFO;
+        DeviceGroupBeginInfo.pNext      = nullptr;
+        DeviceGroupBeginInfo.deviceMask = DeviceMask;
+        CmdBuffBeginInfo.pNext          = &DeviceGroupBeginInfo;
+    }
 
     VkResult err = vkBeginCommandBuffer(CmdBuffer, &CmdBuffBeginInfo);
     DEV_CHECK_ERR(err == VK_SUCCESS, "Failed to begin command buffer");

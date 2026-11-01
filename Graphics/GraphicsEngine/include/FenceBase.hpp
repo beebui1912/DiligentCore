@@ -101,6 +101,20 @@ public:
 #endif
     }
 
+    // Validate IDeviceContext::DeviceWaitForFence() on a hardware queue that contexts on different nodes share
+    void DvpDeviceWaitOnSharedQueue(Uint64 Value)
+    {
+#ifdef DILIGENT_DEVELOPMENT
+        const Uint64 EnqueuedValue = m_EnqueuedFenceValue.load();
+        if (Value > EnqueuedValue)
+        {
+            LOG_WARNING_MESSAGE("Waiting for value ", Value, " of fence '", this->m_Desc.Name, "', which is greater than the last enqueued for signal value (", EnqueuedValue,
+                                "), on a queue that is shared with a context on another node. If that context is to signal the value, this will hang: "
+                                "the wait blocks the queue, and with it the signal. Signal and flush before waiting.");
+        }
+#endif
+    }
+
 protected:
     void UpdateLastCompletedFenceValue(Uint64 NewValue)
     {

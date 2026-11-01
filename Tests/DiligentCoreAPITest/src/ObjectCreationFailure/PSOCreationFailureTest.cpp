@@ -1100,6 +1100,12 @@ TEST_F(PSOCreationFailureTest, TooBigRayRecursionDepth)
 
     auto PsoCI{GetRayTracingPSOCreateInfo("PSO Create Failure - too big ray recursion depth")};
     PsoCI.RayTracingPipeline.MaxRecursionDepth = std::numeric_limits<decltype(PsoCI.RayTracingPipeline.MaxRecursionDepth)>::max();
+
+    // Vulkan does not limit maxRayRecursionDepth from above (Intel Arc A380 reports 256)
+    const Uint32 DeviceLimit = GPUTestingEnvironment::GetInstance()->GetDevice()->GetAdapterInfo().RayTracing.MaxRecursionDepth;
+    if (PsoCI.RayTracingPipeline.MaxRecursionDepth <= DeviceLimit)
+        GTEST_SKIP() << "The largest value of MaxRecursionDepth does not exceed the device limit (" << DeviceLimit << ")";
+
     TestCreatePSOFailure(PsoCI, "MaxRecursionDepth (255) exceeds device limit");
 }
 

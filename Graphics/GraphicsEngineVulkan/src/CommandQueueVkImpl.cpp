@@ -40,7 +40,9 @@ CommandQueueVkImpl::CommandQueueVkImpl(IReferenceCounters*                      
                                        SoftwareQueueIndex                              CommandQueueId,
                                        Uint32                                          NumCommandQueues,
                                        Uint32                                          vkQueueIndex,
-                                       const ImmediateContextCreateInfo&               CreateInfo) :
+                                       const ImmediateContextCreateInfo&               CreateInfo,
+                                       bool                                            IsLinkedGpuMode,
+                                       std::shared_ptr<std::mutex>                     pVkQueueMutex) :
     // clang-format off
     TBase{pRefCounters},
     m_LogicalDevice             {LogicalDevice},
@@ -49,7 +51,10 @@ CommandQueueVkImpl::CommandQueueVkImpl(IReferenceCounters*                      
     m_CommandQueueId            {static_cast<Uint8>(CommandQueueId)},
     m_SupportedTimelineSemaphore{LogicalDevice->GetEnabledExtFeatures().TimelineSemaphore.timelineSemaphore == VK_TRUE},
     m_NumCommandQueues          {static_cast<Uint8>(m_SupportedTimelineSemaphore ? 1u : NumCommandQueues)},
+    m_NodeIndex                 {static_cast<Uint8>(IsLinkedGpuMode && LogicalDevice->IsDeviceGroup() ? CreateInfo.NodeIndex : 0)},
+    m_IsLinkedGpuMode           {IsLinkedGpuMode && LogicalDevice->IsDeviceGroup()},
     m_NextFenceValue            {1},
+    m_pVkQueueMutex             {pVkQueueMutex ? std::move(pVkQueueMutex) : std::make_shared<std::mutex>()},
     m_SyncObjectManager         {std::make_shared<VulkanUtilities::SyncObjectManager>(*LogicalDevice)},
     m_SyncPointAllocator        {GetRawAllocator(), SyncPointVk::SizeOf(m_NumCommandQueues), 16}
 // clang-format on
@@ -147,9 +152,29 @@ __forceinline SyncPointVkPtr CommandQueueVkImpl::CreateSyncPoint(Uint64 dbgValue
     return {new (ptr) SyncPointVk{m_CommandQueueId, m_NumCommandQueues, *m_SyncObjectManager, m_LogicalDevice->GetVkDevice(), dbgValue}, std::move(Deleter)};
 }
 
+namespace
+{
+
+bool HasStructInChain(const void* pNext, VkStructureType sType)
+{
+    for (const VkBaseInStructure* pStruct = static_cast<const VkBaseInStructure*>(pNext); pStruct != nullptr; pStruct = pStruct->pNext)
+    {
+        if (pStruct->sType == sType)
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
 Uint64 CommandQueueVkImpl::Submit(const VkSubmitInfo& InSubmitInfo)
 {
-    std::lock_guard<std::mutex> QueueGuard{m_QueueMutex};
+    return SubmitInternal(InSubmitInfo, 0);
+}
+
+Uint64 CommandQueueVkImpl::SubmitInternal(const VkSubmitInfo& InSubmitInfo, uint32_t CmdBufferDeviceMask)
+{
+    std::lock_guard<std::mutex> QueueGuard{*m_pVkQueueMutex};
 
     // Increment the value before submitting the buffer to be overly safe
     const uint64_t FenceValue = m_NextFenceValue.fetch_add(1);
@@ -178,6 +203,32 @@ Uint64 CommandQueueVkImpl::Submit(const VkSubmitInfo& InSubmitInfo)
     VkSubmitInfo SubmitInfo         = InSubmitInfo;
     SubmitInfo.signalSemaphoreCount = static_cast<Uint32>(m_TempSignalSemaphores.size());
     SubmitInfo.pSignalSemaphores    = m_TempSignalSemaphores.data();
+
+    // Linked multi-GPU: chain VkDeviceGroupSubmitInfo to specify which GPU node executes the command
+    // buffers, signals the semaphores and waits for them. A caller of ICommandQueueVk::Submit() may chain
+    // its own structure instead; a pNext chain must not contain it twice.
+    VkDeviceGroupSubmitInfo DeviceGroupSubmitInfo{};
+    if (m_IsLinkedGpuMode && !HasStructInChain(SubmitInfo.pNext, VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO))
+    {
+        // Command buffers run on this queue's node unless the caller asks for other devices (e.g. initial
+        // resource data, which every device's instance of the memory needs). Semaphores are signaled and
+        // waited for on this queue's node: the wait gates the work this queue's node executes.
+        const uint32_t NodeDeviceMask = CmdBufferDeviceMask != 0 ? CmdBufferDeviceMask : (1u << m_NodeIndex);
+        m_TempCmdBufferDeviceMasks.assign(SubmitInfo.commandBufferCount, NodeDeviceMask);
+        m_TempSignalDeviceIndices.assign(SubmitInfo.signalSemaphoreCount, m_NodeIndex);
+        m_TempWaitDeviceIndices.assign(SubmitInfo.waitSemaphoreCount, m_NodeIndex);
+
+        DeviceGroupSubmitInfo.sType                         = VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO;
+        DeviceGroupSubmitInfo.pNext                         = SubmitInfo.pNext;
+        DeviceGroupSubmitInfo.commandBufferCount            = SubmitInfo.commandBufferCount;
+        DeviceGroupSubmitInfo.pCommandBufferDeviceMasks     = SubmitInfo.commandBufferCount > 0 ? m_TempCmdBufferDeviceMasks.data() : nullptr;
+        DeviceGroupSubmitInfo.signalSemaphoreCount          = SubmitInfo.signalSemaphoreCount;
+        DeviceGroupSubmitInfo.pSignalSemaphoreDeviceIndices = SubmitInfo.signalSemaphoreCount > 0 ? m_TempSignalDeviceIndices.data() : nullptr;
+        DeviceGroupSubmitInfo.waitSemaphoreCount            = SubmitInfo.waitSemaphoreCount;
+        DeviceGroupSubmitInfo.pWaitSemaphoreDeviceIndices   = SubmitInfo.waitSemaphoreCount > 0 ? m_TempWaitDeviceIndices.data() : nullptr;
+
+        SubmitInfo.pNext = &DeviceGroupSubmitInfo;
+    }
 
     const uint32_t SubmitCount =
         (SubmitInfo.waitSemaphoreCount != 0 ||
@@ -221,9 +272,19 @@ Uint64 CommandQueueVkImpl::SubmitCmdBuffer(VkCommandBuffer cmdBuffer)
     return Submit(SubmitInfo);
 }
 
+Uint64 CommandQueueVkImpl::SubmitCmdBufferToDevices(VkCommandBuffer cmdBuffer, uint32_t DeviceMask)
+{
+    VkSubmitInfo SubmitInfo{};
+    SubmitInfo.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    SubmitInfo.commandBufferCount = cmdBuffer != VK_NULL_HANDLE ? 1 : 0;
+    SubmitInfo.pCommandBuffers    = &cmdBuffer;
+
+    return SubmitInternal(SubmitInfo, m_IsLinkedGpuMode ? (DeviceMask & m_LogicalDevice->GetDeviceGroupMask()) : 0u);
+}
+
 Uint64 CommandQueueVkImpl::WaitForIdle()
 {
-    std::lock_guard<std::mutex> QueueGuard{m_QueueMutex};
+    std::lock_guard<std::mutex> QueueGuard{*m_pVkQueueMutex};
 
     // Update last completed fence value to unlock all waiting events.
     const Uint64 FenceValue = m_NextFenceValue.fetch_add(1);
@@ -245,7 +306,7 @@ void CommandQueueVkImpl::EnqueueSignalFence(VkFence vkFence)
 {
     DEV_CHECK_ERR(vkFence != VK_NULL_HANDLE, "vkFence must not be null");
 
-    std::lock_guard<std::mutex> QueueGuard{m_QueueMutex};
+    std::lock_guard<std::mutex> QueueGuard{*m_pVkQueueMutex};
 
     VkResult err = vkQueueSubmit(m_VkQueue, 0, nullptr, vkFence);
     DEV_CHECK_ERR(err == VK_SUCCESS, "Failed to submit fence signal command to the command queue");
@@ -254,7 +315,7 @@ void CommandQueueVkImpl::EnqueueSignalFence(VkFence vkFence)
 
 void CommandQueueVkImpl::EnqueueSignal(VkSemaphore vkTimelineSemaphore, Uint64 Value)
 {
-    std::lock_guard<std::mutex> QueueGuard{m_QueueMutex};
+    std::lock_guard<std::mutex> QueueGuard{*m_pVkQueueMutex};
     InternalSignalSemaphore(vkTimelineSemaphore, Value);
 }
 
@@ -279,6 +340,18 @@ void CommandQueueVkImpl::InternalSignalSemaphore(VkSemaphore vkTimelineSemaphore
     SubmitInfo.signalSemaphoreCount = 1;
     SubmitInfo.pSignalSemaphores    = &vkTimelineSemaphore;
 
+    // Linked multi-GPU: signal on this queue's node (without the structure, device 0 signals)
+    VkDeviceGroupSubmitInfo DeviceGroupSubmitInfo{};
+    const uint32_t          SignalDeviceIndex = m_NodeIndex;
+    if (m_IsLinkedGpuMode)
+    {
+        DeviceGroupSubmitInfo.sType                         = VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO;
+        DeviceGroupSubmitInfo.pNext                         = SubmitInfo.pNext;
+        DeviceGroupSubmitInfo.signalSemaphoreCount          = 1;
+        DeviceGroupSubmitInfo.pSignalSemaphoreDeviceIndices = &SignalDeviceIndex;
+        SubmitInfo.pNext                                    = &DeviceGroupSubmitInfo;
+    }
+
     VkResult err = vkQueueSubmit(m_VkQueue, 1, &SubmitInfo, VK_NULL_HANDLE);
     DEV_CHECK_ERR(err == VK_SUCCESS, "Failed to submit timeline semaphore signal command to the command queue");
     (void)err;
@@ -286,13 +359,13 @@ void CommandQueueVkImpl::InternalSignalSemaphore(VkSemaphore vkTimelineSemaphore
 
 VkResult CommandQueueVkImpl::Present(const VkPresentInfoKHR& PresentInfo)
 {
-    std::lock_guard<std::mutex> QueueGuard{m_QueueMutex};
+    std::lock_guard<std::mutex> QueueGuard{*m_pVkQueueMutex};
     return vkQueuePresentKHR(m_VkQueue, &PresentInfo);
 }
 
 Uint64 CommandQueueVkImpl::BindSparse(const VkBindSparseInfo& InBindInfo)
 {
-    std::lock_guard<std::mutex> QueueGuard{m_QueueMutex};
+    std::lock_guard<std::mutex> QueueGuard{*m_pVkQueueMutex};
 
     // Increment the value before submitting the buffer to be overly safe
     const uint64_t FenceValue = m_NextFenceValue.fetch_add(1);
@@ -321,6 +394,17 @@ Uint64 CommandQueueVkImpl::BindSparse(const VkBindSparseInfo& InBindInfo)
     VkBindSparseInfo BindInfo     = InBindInfo;
     BindInfo.signalSemaphoreCount = static_cast<Uint32>(m_TempSignalSemaphores.size());
     BindInfo.pSignalSemaphores    = m_TempSignalSemaphores.data();
+
+    // Linked multi-GPU: bind the instances of this queue's node (without the structure, device 0's are bound)
+    VkDeviceGroupBindSparseInfo DeviceGroupBindInfo{};
+    if (m_IsLinkedGpuMode && !HasStructInChain(BindInfo.pNext, VK_STRUCTURE_TYPE_DEVICE_GROUP_BIND_SPARSE_INFO))
+    {
+        DeviceGroupBindInfo.sType               = VK_STRUCTURE_TYPE_DEVICE_GROUP_BIND_SPARSE_INFO;
+        DeviceGroupBindInfo.pNext               = BindInfo.pNext;
+        DeviceGroupBindInfo.resourceDeviceIndex = m_NodeIndex;
+        DeviceGroupBindInfo.memoryDeviceIndex   = m_NodeIndex;
+        BindInfo.pNext                          = &DeviceGroupBindInfo;
+    }
 
     VkResult err = vkQueueBindSparse(m_VkQueue, 1, &BindInfo, NewSyncPoint->GetFence());
     DEV_CHECK_ERR(err == VK_SUCCESS, "Failed to submit sparse bind commands to the command queue");

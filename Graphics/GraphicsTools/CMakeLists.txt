@@ -6,6 +6,7 @@ set(INTERFACE
     interface/BufferSuballocator.h
     interface/BytecodeCache.h
     interface/CommonlyUsedStates.h
+    interface/CrossDeviceTransferManager.hpp
     interface/DynamicBuffer.hpp
     interface/DynamicTextureArray.hpp
     interface/DynamicTextureAtlas.h
@@ -30,6 +31,7 @@ set(INTERFACE
 set(SOURCE
     src/BufferSuballocator.cpp
     src/BytecodeCache.cpp
+    src/CrossDeviceTransferManager.cpp
     src/DurationQueryHelper.cpp
     src/DynamicBuffer.cpp
     src/DynamicTextureArray.cpp

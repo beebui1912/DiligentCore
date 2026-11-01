@@ -106,6 +106,12 @@ struct DeviceContextDesc
     Uint8        QueueId    DEFAULT_INITIALIZER(DEFAULT_QUEUE_ID);
 
 
+    /// Target GPU node index for Linked Multi-GPU mode (0-based).
+
+    /// In GPU_MODE_LINKED, this identifies which physical GPU node this context targets.
+    /// In GPU_MODE_SINGLE or GPU_MODE_UNLINKED, this value is ignored (always treated as 0).
+    Uint8        NodeIndex                 DEFAULT_INITIALIZER(0);
+
     /// Required texture granularity for copy operations, for a transfer queue.
 
     /// For graphics and compute queues, the granularity is always {1,1,1}.
@@ -125,12 +131,14 @@ struct DeviceContextDesc
                                 COMMAND_QUEUE_TYPE _QueueType,
                                 Bool               _IsDeferred,
                                 Uint32             _ContextId,
-                                Uint32             _QueueId = DeviceContextDesc{}.QueueId) noexcept :
+                                Uint32             _QueueId   = DeviceContextDesc{}.QueueId,
+                                Uint32             _NodeIndex = DeviceContextDesc{}.NodeIndex) noexcept :
         Name      {_Name      },
         QueueType {_QueueType },
         IsDeferred{_IsDeferred},
         ContextId {static_cast<decltype(ContextId)>(_ContextId)},
-        QueueId   {static_cast<decltype(QueueId)>(_QueueId)}
+        QueueId   {static_cast<decltype(QueueId)>(_QueueId)},
+        NodeIndex {static_cast<decltype(NodeIndex)>(_NodeIndex)}
     {
         if (!IsDeferred)
         {

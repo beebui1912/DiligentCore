@@ -61,6 +61,34 @@ BufferD3D12Impl::BufferD3D12Impl(IReferenceCounters*        pRefCounters,
         LOG_ERROR_AND_THROW("Unified resources are not supported in Direct3D12");
     }
 
+    // Validate multi-GPU node masks against adapter capabilities
+    if (m_Desc.CreationNodeMask != 0)
+    {
+        const Uint32 ValidNodeMask = pRenderDeviceD3D12->GetAdapterInfo().NodeMask;
+        if ((m_Desc.CreationNodeMask & ~ValidNodeMask) != 0)
+        {
+            LOG_WARNING_MESSAGE("BufferDesc.CreationNodeMask (0x", std::hex, m_Desc.CreationNodeMask,
+                                ") contains bits outside of the adapter's valid NodeMask (0x", ValidNodeMask, std::dec,
+                                "). Clamping to valid mask.");
+            m_Desc.CreationNodeMask &= ValidNodeMask;
+            if (m_Desc.CreationNodeMask == 0)
+                m_Desc.CreationNodeMask = 1;
+        }
+    }
+    if (m_Desc.VisibleNodeMask != 0)
+    {
+        const Uint32 ValidNodeMask = pRenderDeviceD3D12->GetAdapterInfo().NodeMask;
+        if ((m_Desc.VisibleNodeMask & ~ValidNodeMask) != 0)
+        {
+            LOG_WARNING_MESSAGE("BufferDesc.VisibleNodeMask (0x", std::hex, m_Desc.VisibleNodeMask,
+                                ") contains bits outside of the adapter's valid NodeMask (0x", ValidNodeMask, std::dec,
+                                "). Clamping to valid mask.");
+            m_Desc.VisibleNodeMask &= ValidNodeMask;
+            if (m_Desc.VisibleNodeMask == 0)
+                m_Desc.VisibleNodeMask = m_Desc.CreationNodeMask != 0 ? m_Desc.CreationNodeMask : 1;
+        }
+    }
+
     Uint32 BufferAlignment = 1;
     if (m_Desc.BindFlags & BIND_UNIFORM_BUFFER)
         BufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
@@ -133,8 +161,9 @@ BufferD3D12Impl::BufferD3D12Impl(IReferenceCounters*        pRefCounters,
                 SetState(RESOURCE_STATE_GENERIC_READ);
             HeapProps.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
             HeapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-            HeapProps.CreationNodeMask     = 1;
-            HeapProps.VisibleNodeMask      = 1;
+            // Use descriptor node masks for linked multi-GPU; fall back to node 1 (default single-GPU node) when unset.
+            HeapProps.CreationNodeMask     = m_Desc.CreationNodeMask != 0 ? m_Desc.CreationNodeMask : 1;
+            HeapProps.VisibleNodeMask      = m_Desc.VisibleNodeMask  != 0 ? m_Desc.VisibleNodeMask  : HeapProps.CreationNodeMask;
 
             const Uint64 InitialDataSize = (pBuffData != nullptr && pBuffData->pData != nullptr) ?
                 std::min(pBuffData->DataSize, d3d12BuffDesc.Width) :
@@ -180,8 +209,9 @@ BufferD3D12Impl::BufferD3D12Impl(IReferenceCounters*        pRefCounters,
                 UploadHeapProps.Type                 = D3D12_HEAP_TYPE_UPLOAD;
                 UploadHeapProps.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
                 UploadHeapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-                UploadHeapProps.CreationNodeMask     = 1;
-                UploadHeapProps.VisibleNodeMask      = 1;
+                // Upload buffer is always visible from all nodes; use the creation node as the allocation node.
+                UploadHeapProps.CreationNodeMask     = m_Desc.CreationNodeMask != 0 ? m_Desc.CreationNodeMask : 1;
+                UploadHeapProps.VisibleNodeMask      = m_Desc.VisibleNodeMask  != 0 ? m_Desc.VisibleNodeMask  : UploadHeapProps.CreationNodeMask;
 
                 d3d12BuffDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 

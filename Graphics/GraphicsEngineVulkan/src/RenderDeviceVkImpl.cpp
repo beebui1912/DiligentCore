@@ -247,6 +247,77 @@ RenderDeviceVkImpl::~RenderDeviceVkImpl()
 }
 
 
+namespace
+{
+
+// Creation node of a resource in a device group: the lowest node of CreationNodeMask (0 when it is not set)
+uint32_t GetCreationNodeIndex(Uint32 CreationNodeMask, uint32_t DeviceGroupMask, const char* ResourceName)
+{
+    const Uint32 ValidMask = CreationNodeMask & DeviceGroupMask;
+    if (ValidMask != CreationNodeMask || PlatformMisc::CountOneBits(ValidMask) > 1)
+    {
+        LOG_WARNING_MESSAGE("CreationNodeMask (0x", std::hex, CreationNodeMask, ") of resource '", (ResourceName != nullptr ? ResourceName : ""),
+                            "' must name exactly one node of the device group (mask 0x", DeviceGroupMask, std::dec, "). Using node ",
+                            (ValidMask != 0 ? PlatformMisc::GetLSB(ValidMask) : 0u), '.');
+    }
+    return ValidMask != 0 ? PlatformMisc::GetLSB(ValidMask) : 0u;
+}
+
+} // namespace
+
+bool RenderDeviceVkImpl::GetPeerBindingDeviceIndices(Uint32                                          CreationNodeMask,
+                                                     Uint32                                          VisibleNodeMask,
+                                                     uint32_t                                        MemoryTypeIndex,
+                                                     const char*                                     ResourceName,
+                                                     std::array<uint32_t, VK_MAX_DEVICE_GROUP_SIZE>& DeviceIndices) const
+{
+    const VulkanUtilities::LogicalDevice& LogicalDevice = *m_LogicalDevice;
+    if (!LogicalDevice.IsDeviceGroup())
+        return false;
+
+    // Default masks: every device keeps its own instance (no peer access)
+    if (CreationNodeMask == 0 && VisibleNodeMask == 0)
+        return false;
+
+    // Memory with a single instance is the same memory for every device
+    if (!LogicalDevice.IsMultiInstanceMemoryType(MemoryTypeIndex))
+        return false;
+
+    const uint32_t GroupSize    = LogicalDevice.GetDeviceGroupSize();
+    const uint32_t GroupMask    = LogicalDevice.GetDeviceGroupMask();
+    const uint32_t CreationNode = GetCreationNodeIndex(CreationNodeMask, GroupMask, ResourceName);
+    // VisibleNodeMask == 0 means the creation node only (as in D3D12)
+    const uint32_t VisibleNodes = ((VisibleNodeMask != 0 ? VisibleNodeMask : 0u) | (1u << CreationNode)) & GroupMask;
+
+    // Same as The Forge's util_calculate_device_indices(): every visible node uses the creation node's
+    // instance, the other nodes keep their own (which the resource does not use).
+    // Example: created on node 0, visible to nodes 0 and 1 of a 3-device group -> {0, 0, 2}.
+    bool NeedsPeerBinding = false;
+    for (uint32_t Device = 0; Device < GroupSize; ++Device)
+    {
+        DeviceIndices[Device] = ((VisibleNodes >> Device) & 1u) != 0 ? CreationNode : Device;
+        NeedsPeerBinding |= DeviceIndices[Device] != Device;
+    }
+
+    return NeedsPeerBinding;
+}
+
+uint32_t RenderDeviceVkImpl::GetInitialDataDeviceMask(Uint32 CreationNodeMask, Uint32 VisibleNodeMask, uint32_t MemoryTypeIndex) const
+{
+    const VulkanUtilities::LogicalDevice& LogicalDevice = *m_LogicalDevice;
+    if (!LogicalDevice.IsDeviceGroup() || !LogicalDevice.IsMultiInstanceMemoryType(MemoryTypeIndex))
+        return 0;
+
+    // Default masks: every device's instance needs the data
+    if (CreationNodeMask == 0 && VisibleNodeMask == 0)
+        return LogicalDevice.GetDeviceGroupMask();
+
+    // Explicit masks: the visible nodes are bound to the creation node's instance
+    // (an invalid CreationNodeMask is reported by GetPeerBindingDeviceIndices())
+    const Uint32 ValidMask = CreationNodeMask & LogicalDevice.GetDeviceGroupMask();
+    return 1u << (ValidMask != 0 ? PlatformMisc::GetLSB(ValidMask) : 0u);
+}
+
 void RenderDeviceVkImpl::AllocateTransientCmdPool(SoftwareQueueIndex                   CommandQueueId,
                                                   VulkanUtilities::CommandPoolWrapper& CmdPool,
                                                   VulkanUtilities::CommandBuffer&      CmdBuffer,
@@ -291,7 +362,8 @@ void RenderDeviceVkImpl::AllocateTransientCmdPool(SoftwareQueueIndex            
 
 void RenderDeviceVkImpl::ExecuteAndDisposeTransientCmdBuff(SoftwareQueueIndex                    CommandQueueId,
                                                            VkCommandBuffer                       vkCmdBuff,
-                                                           VulkanUtilities::CommandPoolWrapper&& CmdPool)
+                                                           VulkanUtilities::CommandPoolWrapper&& CmdPool,
+                                                           uint32_t                              DeviceMask)
 {
     VERIFY_EXPR(vkCmdBuff != VK_NULL_HANDLE);
 
@@ -328,7 +400,10 @@ void RenderDeviceVkImpl::ExecuteAndDisposeTransientCmdBuff(SoftwareQueueIndex   
     LockCmdQueueAndRun(CommandQueueId,
                        [&](ICommandQueueVk* pCmdQueueVk) //
                        {
-                           FenceValue = pCmdQueueVk->SubmitCmdBuffer(vkCmdBuff);
+                           // The command buffer is begun without a device mask, so it can run on any device of a group
+                           FenceValue = DeviceMask != 0 ?
+                               ClassPtrCast<CommandQueueVkImpl>(pCmdQueueVk)->SubmitCmdBufferToDevices(vkCmdBuff, DeviceMask) :
+                               pCmdQueueVk->SubmitCmdBuffer(vkCmdBuff);
                        } //
     );
 
@@ -820,10 +895,13 @@ Bool RenderDeviceVkImpl::GetSparseTextureFormatInfo(TEXTURE_FORMAT           Tex
 
     vkGetPhysicalDeviceSparseImageFormatProperties(vkDevice, vkFormat, vkType, vkSampleCount, vkDefaultUsage, VK_IMAGE_TILING_OPTIMAL, &FmtPropsCount, FmtProps);
 
+    // Tile size in texels (imageGranularity may be in compressed blocks; a sparse block is the standard block size)
+    const VkExtent3D Granularity = SparseImageGranularityToTexels(FmtProps[0].imageGranularity, TexFormat, SampleCount, m_AdapterInfo.SparseResources.StandardBlockSize);
+
     Info.BindFlags   = BIND_NONE;
-    Info.TileSize[0] = FmtProps[0].imageGranularity.width;
-    Info.TileSize[1] = FmtProps[0].imageGranularity.height;
-    Info.TileSize[2] = FmtProps[0].imageGranularity.depth;
+    Info.TileSize[0] = Granularity.width;
+    Info.TileSize[1] = Granularity.height;
+    Info.TileSize[2] = Granularity.depth;
     Info.Flags       = VkSparseImageFormatFlagsToSparseTextureFlags(FmtProps[0].flags);
 
     const auto CheckUsage = [&](VkImageUsageFlags vkUsage) {

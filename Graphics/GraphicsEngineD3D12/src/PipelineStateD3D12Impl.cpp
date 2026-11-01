@@ -543,7 +543,8 @@ void PipelineStateD3D12Impl::InitRootSignature(const PipelineStateCreateInfo& Cr
 
     if (pLocalRootSig != nullptr && pLocalRootSig->IsDefined())
     {
-        if (!pLocalRootSig->Create(GetDevice()->GetD3D12Device(), m_RootSig->GetTotalSpaces()))
+        // The ray tracing state object applies to all nodes, and so must its local root signature
+        if (!pLocalRootSig->Create(GetDevice()->GetD3D12Device(), m_RootSig->GetTotalSpaces(), GetDevice()->GetSharedNodeMask()))
             LOG_ERROR_AND_THROW("Failed to create local root signature for pipeline '", m_Desc.Name, "'.");
     }
 
@@ -776,7 +777,7 @@ void PipelineStateD3D12Impl::InitializePipeline(const GraphicsPipelineStateCreat
         // For single GPU operation, set this to zero. If there are multiple GPU nodes,
         // set bits to identify the nodes (the device's physical adapters) for which the
         // graphics pipeline state is to apply. Each bit in the mask corresponds to a single node.
-        d3d12PSODesc.NodeMask = 0;
+        d3d12PSODesc.NodeMask = m_pDevice->GetSharedNodeMask(); // 0 unless the device uses linked nodes
 
         d3d12PSODesc.CachedPSO.pCachedBlob           = nullptr;
         d3d12PSODesc.CachedPSO.CachedBlobSizeInBytes = 0;
@@ -860,7 +861,7 @@ void PipelineStateD3D12Impl::InitializePipeline(const GraphicsPipelineStateCreat
         // For single GPU operation, set this to zero. If there are multiple GPU nodes,
         // set bits to identify the nodes (the device's physical adapters) for which the
         // graphics pipeline state is to apply. Each bit in the mask corresponds to a single node.
-        d3d12PSODesc.NodeMask = 0;
+        d3d12PSODesc.NodeMask = m_pDevice->GetSharedNodeMask(); // 0 unless the device uses linked nodes
 
         d3d12PSODesc.CachedPSO->pCachedBlob           = nullptr;
         d3d12PSODesc.CachedPSO->CachedBlobSizeInBytes = 0;
@@ -911,7 +912,7 @@ void PipelineStateD3D12Impl::InitializePipeline(const ComputePipelineStateCreate
     // For single GPU operation, set this to zero. If there are multiple GPU nodes,
     // set bits to identify the nodes (the device's physical adapters) for which the
     // graphics pipeline state is to apply. Each bit in the mask corresponds to a single node.
-    d3d12PSODesc.NodeMask = 0;
+    d3d12PSODesc.NodeMask = m_pDevice->GetSharedNodeMask(); // 0 unless the device uses linked nodes
 
     d3d12PSODesc.CachedPSO.pCachedBlob           = nullptr;
     d3d12PSODesc.CachedPSO.CachedBlobSizeInBytes = 0;

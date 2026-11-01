@@ -30,6 +30,8 @@
 /// \file
 /// Declaration of Diligent::TextureVkImpl class
 
+#include <atomic>
+
 #include "EngineVkImplTraits.hpp"
 #include "TextureBase.hpp"
 #include "TextureViewVkImpl.hpp"
@@ -98,12 +100,20 @@ public:
     // ("Copying Data Between Buffers and Images")
     static constexpr Uint32 StagingBufferOffsetAlignment = 16; // max texel size - 16 bytes (RGBA32F), max texel block size - 16 bytes.
 
+#ifdef DILIGENT_DEVELOPMENT
+    // Linked multi-GPU: with default node masks every node has its own instance of the texture, with its
+    // own layout, while the state is tracked once per texture. Warns when two nodes use such a texture.
+    void DvpVerifySingleNodeUse(Uint32 NodeIndex);
+#endif
+
 protected:
     void CreateViewInternal(const struct TextureViewDesc& ViewDesc, ITextureView** ppView, bool bIsDefaultView) override;
 
+    // InitDeviceMask: linked multi-GPU devices whose instance of the memory receives the data (0 = the queue's node)
     void InitializeContentOnDevice(const TextureData&          InitData,
                                    const TextureFormatAttribs& FmtAttribs,
-                                   const VkImageCreateInfo&    ImageCI) noexcept(false);
+                                   const VkImageCreateInfo&    ImageCI,
+                                   uint32_t                    InitDeviceMask) noexcept(false);
     bool InitializeContentOnHost(const TextureData&          InitData,
                                  const TextureFormatAttribs& FmtAttribs,
                                  const VkImageCreateInfo&    ImageCI) noexcept(false);
@@ -119,6 +129,10 @@ protected:
     VulkanUtilities::BufferWrapper    m_StagingBuffer;
     VulkanUtilities::MemoryAllocation m_MemoryAllocation;
     VkDeviceSize                      m_StagingDataAlignedOffset = 0;
+
+#ifdef DILIGENT_DEVELOPMENT
+    std::atomic<Uint32> m_DvpUsedNodes{0};
+#endif
 };
 
 } // namespace Diligent

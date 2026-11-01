@@ -615,6 +615,15 @@ TEST(ComputeShaderTest, FillTexturePS_Signatures)
 
     pContext->Draw(DrawAttribs{3, DRAW_FLAG_VERIFY_ALL});
 
+    // Both draws write every pixel of the same UAV: the first one black, the second one the gradient.
+    // UAV writes of different draws are not ordered without a barrier, so some of the first draw's
+    // writes could land after the second draw's (seen on Intel Arc in D3D12 and Vulkan).
+    {
+        StateTransitionDesc UAVBarrier{pTestingSwapChain->GetCurrentBackBufferUAV()->GetTexture(),
+                                       RESOURCE_STATE_UNORDERED_ACCESS, RESOURCE_STATE_UNORDERED_ACCESS};
+        pContext->TransitionResourceStates(1, &UAVBarrier);
+    }
+
     pContext->CommitShaderResources(pSRB0[1], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     pContext->Draw(DrawAttribs{3, DRAW_FLAG_VERIFY_ALL});
 

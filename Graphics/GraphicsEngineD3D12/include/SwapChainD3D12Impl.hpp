@@ -74,14 +74,30 @@ public:
     }
 
     /// Implementation of ISwapChain::GetDepthBufferDSV() in Direct3D12 backend.
-    virtual ITextureViewD3D12* DILIGENT_CALL_TYPE GetDepthBufferDSV() override final { return m_pDepthBufferDSV; }
+    virtual ITextureViewD3D12* DILIGENT_CALL_TYPE GetDepthBufferDSV() override final
+    {
+        if (m_pDepthBufferDSV.empty())
+            return nullptr;
+        // Alternate frame rendering: the depth buffer on the node of the current back buffer
+        return m_pDepthBufferDSV.size() == 1 ? m_pDepthBufferDSV[0] : m_pDepthBufferDSV[m_pSwapChain->GetCurrentBackBufferIndex() % m_pDepthBufferDSV.size()];
+    }
 
 private:
     virtual void UpdateSwapChain(bool CreateNew) override final;
     void         InitBuffersAndViews();
 
+    // Alternate frame rendering (SwapChainDesc::AlternateFrameContextMask)
+    void InitAlternateFrameContexts(const class DeviceContextD3D12Impl* pSwapChainContext);
+    void AssignBuffersToAlternateFrameContexts();
+
+    // The immediate context that renders to and presents the back buffer
+    RefCntAutoPtr<IDeviceContext> GetBackBufferContext(Uint32 BackBuffer);
+
     std::vector<RefCntAutoPtr<ITextureViewD3D12>, STDAllocatorRawMem<RefCntAutoPtr<ITextureViewD3D12>>> m_pBackBufferRTV;
-    RefCntAutoPtr<ITextureViewD3D12>                                                                    m_pDepthBufferDSV;
+    // One depth buffer, or one per context in alternate frame rendering
+    std::vector<RefCntAutoPtr<ITextureViewD3D12>> m_pDepthBufferDSV;
+    // Ids of the contexts of AlternateFrameContextMask, empty if the mode is not used
+    std::vector<Uint32> m_AlternateFrameContexts;
 };
 
 } // namespace Diligent

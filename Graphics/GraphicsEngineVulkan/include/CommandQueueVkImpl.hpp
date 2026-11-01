@@ -104,7 +104,9 @@ public:
                        SoftwareQueueIndex                              CommandQueueId,
                        Uint32                                          NumCommandQueues,
                        Uint32                                          vkQueueIndex,
-                       const ImmediateContextCreateInfo&               CreateInfo);
+                       const ImmediateContextCreateInfo&               CreateInfo,
+                       bool                                            IsLinkedGpuMode = false,
+                       std::shared_ptr<std::mutex>                     pVkQueueMutex   = nullptr);
     ~CommandQueueVkImpl();
 
     IMPLEMENT_QUERY_INTERFACE_IN_PLACE(IID_CommandQueueVk, TBase)
@@ -155,8 +157,19 @@ public:
         return m_LastSyncPoint;
     }
 
+    /// Linked multi-GPU: submits a command buffer that runs on the physical devices of DeviceMask
+    /// (a queue of a device group can run work on any of its devices). 0 means this queue's node,
+    /// which is also what SubmitCmdBuffer() does. On an ordinary device the mask is ignored.
+    Uint64 SubmitCmdBufferToDevices(VkCommandBuffer cmdBuffer, uint32_t DeviceMask);
+
+    /// GPU node of this queue's work in a device group (0 on an ordinary device)
+    Uint32 GetNodeIndex() const { return m_NodeIndex; }
+
 private:
     SyncPointVkPtr CreateSyncPoint(Uint64 dbgValue);
+
+    // CmdBufferDeviceMask: device mask of the command buffers in a device group (0 = this queue's node)
+    Uint64 SubmitInternal(const VkSubmitInfo& InSubmitInfo, uint32_t CmdBufferDeviceMask);
 
     void InternalSignalSemaphore(VkSemaphore vkTimelineSemaphore, Uint64 Value);
 
@@ -167,6 +180,8 @@ private:
     const SoftwareQueueIndex m_CommandQueueId;
     const bool               m_SupportedTimelineSemaphore;
     const Uint8              m_NumCommandQueues;
+    const Uint8              m_NodeIndex;       // GPU node of this queue's work in a device group (0-based; 0 otherwise)
+    const bool               m_IsLinkedGpuMode; // True if the logical device is a device group
 
     // Fence is signaled right after a command buffer has been
     // submitted to the command queue for execution.
@@ -177,11 +192,17 @@ private:
     // A value that will be signaled by the command queue next
     std::atomic<Uint64> m_NextFenceValue{1};
 
-    // Protects access to the m_VkQueue internal data.
-    std::mutex m_QueueMutex;
+    // Protects access to the m_VkQueue internal data. Linked multi-GPU: command queues
+    // on different nodes that share a VkQueue also share this mutex.
+    const std::shared_ptr<std::mutex> m_pVkQueueMutex;
 
     // Array used to merge semaphores from SubmitInfo and from SyncPointVk
     std::vector<VkSemaphore> m_TempSignalSemaphores;
+
+    // Linked multi-GPU: arrays of VkDeviceGroupSubmitInfo, reused by every submission (protected by m_pVkQueueMutex)
+    std::vector<uint32_t> m_TempCmdBufferDeviceMasks;
+    std::vector<uint32_t> m_TempSignalDeviceIndices;
+    std::vector<uint32_t> m_TempWaitDeviceIndices;
 
     // Protects access to the m_LastSyncPoint
     Threading::SpinLock m_LastSyncPointLock;

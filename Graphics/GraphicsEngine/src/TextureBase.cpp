@@ -164,6 +164,27 @@ void ValidateTextureDesc(const TextureDesc& Desc, const IRenderDevice* pDevice) 
             LOG_TEXTURE_ERROR_AND_THROW("Memoryless attachment is not compatible with mipmap generation.");
     }
 
+    if (Desc.MiscFlags & MISC_TEXTURE_FLAG_SHARED_CROSS_ADAPTER)
+    {
+        if (pDevice->GetDeviceInfo().Type != RENDER_DEVICE_TYPE_D3D12)
+            LOG_TEXTURE_ERROR_AND_THROW("MISC_TEXTURE_FLAG_SHARED_CROSS_ADAPTER is only supported in Direct3D12.");
+
+        if (Desc.Type != RESOURCE_DIM_TEX_2D)
+            LOG_TEXTURE_ERROR_AND_THROW("MISC_TEXTURE_FLAG_SHARED_CROSS_ADAPTER requires RESOURCE_DIM_TEX_2D.");
+
+        if (Desc.Usage != USAGE_DEFAULT)
+            LOG_TEXTURE_ERROR_AND_THROW("MISC_TEXTURE_FLAG_SHARED_CROSS_ADAPTER requires USAGE_DEFAULT.");
+
+        if (Desc.MipLevels != 1 || (Desc.MiscFlags & MISC_TEXTURE_FLAG_GENERATE_MIPS) != 0)
+            LOG_TEXTURE_ERROR_AND_THROW("MISC_TEXTURE_FLAG_SHARED_CROSS_ADAPTER requires one mip level.");
+
+        if (Desc.SampleCount != 1)
+            LOG_TEXTURE_ERROR_AND_THROW("MISC_TEXTURE_FLAG_SHARED_CROSS_ADAPTER is not compatible with multisampling.");
+
+        if (Desc.BindFlags & BIND_DEPTH_STENCIL)
+            LOG_TEXTURE_ERROR_AND_THROW("MISC_TEXTURE_FLAG_SHARED_CROSS_ADAPTER is not compatible with BIND_DEPTH_STENCIL.");
+    }
+
     if (Desc.Usage == USAGE_STAGING)
     {
         if (Desc.BindFlags != 0)

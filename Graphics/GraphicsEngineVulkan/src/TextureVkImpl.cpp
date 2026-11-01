@@ -290,7 +290,15 @@ TextureVkImpl::TextureVkImpl(IReferenceCounters*        pRefCounters,
             VkDeviceSize AlignedOffset = AlignUp(m_MemoryAllocation.UnalignedOffset, MemReqs.alignment);
             VERIFY_EXPR(m_MemoryAllocation.Size >= MemReqs.size + (AlignedOffset - m_MemoryAllocation.UnalignedOffset));
             VkDeviceMemory Memory = m_MemoryAllocation.Page->GetVkMemory();
-            VkResult       err    = LogicalDevice.BindImageMemory(m_VulkanImage, Memory, AlignedOffset);
+
+            // Linked multi-GPU: nodes in VisibleNodeMask use the creation node's instance of the memory.
+            // The memory type is the one AllocateMemory() selects for these requirements.
+            const uint32_t MemoryTypeIndex = pRenderDeviceVk->GetPhysicalDevice().GetMemoryTypeIndex(MemReqs.memoryTypeBits, ImageMemoryFlags);
+
+            std::array<uint32_t, VK_MAX_DEVICE_GROUP_SIZE> PeerDeviceIndices{};
+            const bool                                     PeerBinding = pRenderDeviceVk->GetPeerBindingDeviceIndices(m_Desc.CreationNodeMask, m_Desc.VisibleNodeMask, MemoryTypeIndex, m_Desc.Name, PeerDeviceIndices);
+
+            VkResult err = LogicalDevice.BindImageMemory(m_VulkanImage, Memory, AlignedOffset, PeerBinding ? PeerDeviceIndices.data() : nullptr);
             CHECK_VK_ERROR_AND_THROW(err, "Failed to bind image memory");
 
             if (InitContent)
@@ -303,7 +311,8 @@ TextureVkImpl::TextureVkImpl(IReferenceCounters*        pRefCounters,
 
                 if (!InitializedOnHost)
                 {
-                    InitializeContentOnDevice(*pInitData, FmtAttribs, ImageCI);
+                    InitializeContentOnDevice(*pInitData, FmtAttribs, ImageCI,
+                                              pRenderDeviceVk->GetInitialDataDeviceMask(m_Desc.CreationNodeMask, m_Desc.VisibleNodeMask, MemoryTypeIndex));
                 }
             }
             else
@@ -417,7 +426,8 @@ bool TextureVkImpl::InitializeContentOnHost(const TextureData&          InitData
 
 void TextureVkImpl::InitializeContentOnDevice(const TextureData&          InitData,
                                               const TextureFormatAttribs& FmtAttribs,
-                                              const VkImageCreateInfo&    ImageCI) noexcept(false)
+                                              const VkImageCreateInfo&    ImageCI,
+                                              uint32_t                    InitDeviceMask) noexcept(false)
 {
     const VulkanUtilities::LogicalDevice& LogicalDevice = GetDevice()->GetLogicalDevice();
 
@@ -572,7 +582,7 @@ void TextureVkImpl::InitializeContentOnDevice(const TextureData&          InitDa
                                 CurrentLayout, // dstImageLayout must be VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL or VK_IMAGE_LAYOUT_GENERAL
                                 static_cast<uint32_t>(Regions.size()), Regions.data());
 
-    GetDevice()->ExecuteAndDisposeTransientCmdBuff(CmdQueueInd, CmdBuffer.GetVkCmdBuffer(), std::move(CmdPool));
+    GetDevice()->ExecuteAndDisposeTransientCmdBuff(CmdQueueInd, CmdBuffer.GetVkCmdBuffer(), std::move(CmdPool), InitDeviceMask);
 
     // After command buffer is submitted, safe-release resources. This strategy
     // is little overconservative as the resources will be released after the first
@@ -993,10 +1003,14 @@ void TextureVkImpl::InitSparseProperties() noexcept(false)
     Props.MipTailSize    = SparseReq[0].imageMipTailSize;
     Props.MipTailStride  = SparseReq[0].imageMipTailStride;
     Props.FirstMipInTail = SparseReq[0].imageMipTailFirstLod;
-    Props.TileSize[0]    = SparseReq[0].formatProperties.imageGranularity.width;
-    Props.TileSize[1]    = SparseReq[0].formatProperties.imageGranularity.height;
-    Props.TileSize[2]    = SparseReq[0].formatProperties.imageGranularity.depth;
-    Props.Flags          = VkSparseImageFormatFlagsToSparseTextureFlags(SparseReq[0].formatProperties.flags);
+
+    // Tile size in texels (imageGranularity may be in compressed blocks; the memory alignment is the sparse block size)
+    const VkExtent3D Granularity = SparseImageGranularityToTexels(SparseReq[0].formatProperties.imageGranularity, m_Desc.Format, m_Desc.SampleCount, MemReq.alignment);
+
+    Props.TileSize[0] = Granularity.width;
+    Props.TileSize[1] = Granularity.height;
+    Props.TileSize[2] = Granularity.depth;
+    Props.Flags       = VkSparseImageFormatFlagsToSparseTextureFlags(SparseReq[0].formatProperties.flags);
 
     if (m_Desc.GetArraySize() == 1)
     {
@@ -1041,5 +1055,23 @@ void TextureVkImpl::InitSparseProperties() noexcept(false)
     VERIFY(BytesPerTile == Props.BlockSize, "Expected that memory alignment equals to block size");
 #endif
 }
+
+#ifdef DILIGENT_DEVELOPMENT
+void TextureVkImpl::DvpVerifySingleNodeUse(Uint32 NodeIndex)
+{
+    if (m_Desc.CreationNodeMask != 0 || m_Desc.VisibleNodeMask != 0)
+        return; // One instance of the texture is used by every node
+
+    const Uint32 NodeBit   = 1u << NodeIndex;
+    const Uint32 PrevNodes = m_DvpUsedNodes.fetch_or(NodeBit);
+    if (PrevNodes != 0 && (PrevNodes & NodeBit) == 0 && PlatformMisc::CountOneBits(PrevNodes) == 1)
+    {
+        LOG_WARNING_MESSAGE("Texture '", m_Desc.Name, "' with default node masks is used on another GPU node (", NodeIndex,
+                            "). Every node has its own copy of the texture, but the resource state is tracked once per texture, ",
+                            "so a state transition made on one node is not made on the other one's copy. ",
+                            "Set CreationNodeMask and VisibleNodeMask, or create a texture per node.");
+    }
+}
+#endif
 
 } // namespace Diligent

@@ -2113,6 +2113,34 @@ SPARSE_TEXTURE_FLAGS VkSparseImageFormatFlagsToSparseTextureFlags(VkSparseImageF
     return Result;
 }
 
+VkExtent3D SparseImageGranularityToTexels(const VkExtent3D& Granularity,
+                                          TEXTURE_FORMAT    Format,
+                                          Uint32            SampleCount,
+                                          Uint64            SparseBlockSize)
+{
+    const TextureFormatAttribs& FmtAttribs = GetTextureFormatAttribs(Format);
+    if (FmtAttribs.ComponentType != COMPONENT_TYPE_COMPRESSED || SparseBlockSize == 0 ||
+        (FmtAttribs.BlockWidth <= 1 && FmtAttribs.BlockHeight <= 1))
+        return Granularity;
+
+    // Diligent's tile size is in texels. For block-compressed formats, the standard sparse block shapes
+    // are defined in compressed blocks, and some implementations (e.g. Intel Arc on Windows) report
+    // imageGranularity in compressed blocks as well (BC1: 128x64 instead of 512x256 texels), while
+    // others report texels. A sparse block always holds SparseBlockSize bytes, which tells the two apart.
+    const Uint64 BytesPerBlock  = Uint64{FmtAttribs.GetElementSize()} * std::max(SampleCount, 1u);
+    const Uint64 BlocksIfTexels = Uint64{Granularity.width / FmtAttribs.BlockWidth} * (Granularity.height / FmtAttribs.BlockHeight) * Granularity.depth;
+    const Uint64 BlocksIfBlocks = Uint64{Granularity.width} * Granularity.height * Granularity.depth;
+    if (BlocksIfTexels * BytesPerBlock != SparseBlockSize && BlocksIfBlocks * BytesPerBlock == SparseBlockSize)
+    {
+        return VkExtent3D{
+            Granularity.width * FmtAttribs.BlockWidth,
+            Granularity.height * FmtAttribs.BlockHeight,
+            Granularity.depth,
+        };
+    }
+    return Granularity;
+}
+
 VkImageUsageFlags BindFlagsToVkImageUsage(BIND_FLAGS Flags, bool IsMemoryless, bool FragDensityMapInsteadOfShadingRate)
 {
     VkImageUsageFlags Result = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;

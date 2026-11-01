@@ -100,6 +100,37 @@ DeviceContextVkImpl::DeviceContextVkImpl(IReferenceCounters*      pRefCounters,
     }
 // clang-format on
 {
+#if DILIGENT_USE_VOLK
+    // Route this context's command-buffer calls through the owning device's optimized per-device
+    // function table so that multiple Vulkan devices can record commands simultaneously without
+    // clobbering each other's global function pointers (see VulkanUtilities::CommandBuffer).
+    m_CommandBuffer.SetDeviceTable(&m_pDevice->GetLogicalDevice().GetVkTable());
+#endif
+
+    // Linked multi-GPU (VK_KHR_device_group): when the logical device is a device group, command buffers
+    // recorded by an immediate context begin with the device mask of its node
+    // (VkDeviceGroupCommandBufferBeginInfo). A deferred context does not know where its command list will be
+    // executed, so its command buffers begin with every device of the group: the submission on the executing
+    // immediate context then selects that context's node (commands run on the devices that are in both the
+    // command buffer's device mask and the submission's). Left at 0 (nothing chained) when the device is not
+    // a group, so the recording path is unchanged.
+    const VulkanUtilities::LogicalDevice& LogicalDevice = m_pDevice->GetLogicalDevice();
+    if (LogicalDevice.IsDeviceGroup())
+        m_CmdBufferDeviceMask = m_Desc.IsDeferred ? LogicalDevice.GetDeviceGroupMask() : (1u << m_Desc.NodeIndex);
+
+#ifdef DILIGENT_DEVELOPMENT
+    if (!IsDeferred() && LogicalDevice.IsDeviceGroup())
+    {
+        VkQueue vkThisQueue = VK_NULL_HANDLE;
+        m_pDevice->LockCmdQueueAndRun(GetCommandQueueId(), [&vkThisQueue](ICommandQueueVk* pCmdQueue) { vkThisQueue = pCmdQueue->GetVkQueue(); });
+        for (Uint32 q = 0; q < m_pDevice->GetCommandQueueCount(); ++q)
+        {
+            if (q != Uint32{GetCommandQueueId()})
+                m_pDevice->LockCmdQueueAndRun(SoftwareQueueIndex{q}, [&](ICommandQueueVk* pCmdQueue) { m_DvpVkQueueIsShared = m_DvpVkQueueIsShared || pCmdQueue->GetVkQueue() == vkThisQueue; });
+        }
+    }
+#endif
+
     if (!IsDeferred())
     {
         PrepareCommandPool(GetCommandQueueId());
@@ -1636,6 +1667,10 @@ void DeviceContextVkImpl::Flush(Uint32               NumCommandLists,
     {
         FenceVkImpl* pFenceVk = val_fence.second;
         pFenceVk->DvpDeviceWait(val_fence.first);
+#ifdef DILIGENT_DEVELOPMENT
+        if (m_DvpVkQueueIsShared)
+            pFenceVk->DvpDeviceWaitOnSharedQueue(val_fence.first);
+#endif
 
         if (pFenceVk->IsTimelineSemaphore())
         {
@@ -3165,6 +3200,10 @@ void DeviceContextVkImpl::TransitionTextureState(TextureVkImpl&           Textur
                                                  VkImageSubresourceRange* pSubresRange /* = nullptr*/)
 {
     VERIFY(m_pActiveRenderPass == nullptr, "State transitions are not allowed inside a render pass");
+#ifdef DILIGENT_DEVELOPMENT
+    if (m_CmdBufferDeviceMask != 0 && !IsDeferred())
+        TextureVk.DvpVerifySingleNodeUse(m_Desc.NodeIndex);
+#endif
     if (OldState == RESOURCE_STATE_UNKNOWN)
     {
         if (TextureVk.IsInKnownState())
@@ -3599,6 +3638,14 @@ void DeviceContextVkImpl::AliasingBarrier(IDeviceObject* pResourceBefore, IDevic
     GetAllowedStagesAndAccessMask(GetResourceBindFlags(pResourceAfter), vkDstStages, vkDstAccessMask);
 
     EnsureVkCmdBuffer();
+    if (m_pDevice->GetAdapterInfo().Vendor == ADAPTER_VENDOR_INTEL)
+    {
+        // Intel Arc A380, Vulkan driver 101.9150: writes through two aliases of the same memory are not
+        // ordered by a device-to-device memory dependency, not even from all commands to all commands,
+        // and half of the later write is lost. A dependency through the host stage does order them.
+        m_CommandBuffer.MemoryBarrierThroughHost(vkSrcAccessMask, vkDstAccessMask, vkSrcStages, vkDstStages);
+        return;
+    }
     m_CommandBuffer.MemoryBarrier(vkSrcAccessMask, vkDstAccessMask, vkSrcStages, vkDstStages);
 }
 
@@ -4389,6 +4436,10 @@ void DeviceContextVkImpl::BindSparseResourceMemory(const BindSparseResourceMemor
         FenceVkImpl* pFenceVk  = ClassPtrCast<FenceVkImpl>(Attribs.ppWaitFences[i]);
         Uint64       WaitValue = Attribs.pWaitFenceValues[i];
         pFenceVk->DvpDeviceWait(WaitValue);
+#ifdef DILIGENT_DEVELOPMENT
+        if (m_DvpVkQueueIsShared)
+            pFenceVk->DvpDeviceWaitOnSharedQueue(WaitValue);
+#endif
 
         if (pFenceVk->IsTimelineSemaphore())
         {

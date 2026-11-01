@@ -34,6 +34,70 @@
 namespace VulkanUtilities
 {
 
+#if DILIGENT_USE_VOLK
+// The command buffer records commands through a per-device volk function table
+// (VulkanUtilities::LogicalDevice::GetVkTable()) so that multiple Vulkan devices can be driven
+// simultaneously, each dispatching its own optimized device-level entry points. If the table has
+// not been assigned to this command buffer (e.g. a transient upload buffer), calls fall back to the
+// global (trampolined) function pointers loaded by volkLoadInstance(), which are valid for any device.
+//
+// NOTE: the preprocessor does NOT expand macros inside string literals, so the vkCmd* names that
+//       appear in VERIFY()/log messages below are left untouched by these redefinitions.
+#    define DILIGENT_CMD_VK(Func) (m_pVkTable != nullptr ? m_pVkTable->Func : ::Func)
+#    define vkCmdClearColorImage                         DILIGENT_CMD_VK(vkCmdClearColorImage)
+#    define vkCmdClearDepthStencilImage                  DILIGENT_CMD_VK(vkCmdClearDepthStencilImage)
+#    define vkCmdClearAttachments                        DILIGENT_CMD_VK(vkCmdClearAttachments)
+#    define vkCmdDraw                                    DILIGENT_CMD_VK(vkCmdDraw)
+#    define vkCmdDrawIndexed                             DILIGENT_CMD_VK(vkCmdDrawIndexed)
+#    define vkCmdDrawIndirect                            DILIGENT_CMD_VK(vkCmdDrawIndirect)
+#    define vkCmdDrawIndexedIndirect                     DILIGENT_CMD_VK(vkCmdDrawIndexedIndirect)
+#    define vkCmdDrawIndirectCountKHR                    DILIGENT_CMD_VK(vkCmdDrawIndirectCountKHR)
+#    define vkCmdDrawIndexedIndirectCountKHR             DILIGENT_CMD_VK(vkCmdDrawIndexedIndirectCountKHR)
+#    define vkCmdDrawMeshTasksEXT                        DILIGENT_CMD_VK(vkCmdDrawMeshTasksEXT)
+#    define vkCmdDrawMeshTasksIndirectEXT                DILIGENT_CMD_VK(vkCmdDrawMeshTasksIndirectEXT)
+#    define vkCmdDrawMeshTasksIndirectCountEXT           DILIGENT_CMD_VK(vkCmdDrawMeshTasksIndirectCountEXT)
+#    define vkCmdDrawMultiEXT                            DILIGENT_CMD_VK(vkCmdDrawMultiEXT)
+#    define vkCmdDrawMultiIndexedEXT                     DILIGENT_CMD_VK(vkCmdDrawMultiIndexedEXT)
+#    define vkCmdDispatch                                DILIGENT_CMD_VK(vkCmdDispatch)
+#    define vkCmdDispatchIndirect                        DILIGENT_CMD_VK(vkCmdDispatchIndirect)
+#    define vkCmdBeginRenderPass                         DILIGENT_CMD_VK(vkCmdBeginRenderPass)
+#    define vkCmdEndRenderPass                           DILIGENT_CMD_VK(vkCmdEndRenderPass)
+#    define vkCmdNextSubpass                             DILIGENT_CMD_VK(vkCmdNextSubpass)
+#    define vkCmdBeginRenderingKHR                       DILIGENT_CMD_VK(vkCmdBeginRenderingKHR)
+#    define vkCmdEndRenderingKHR                         DILIGENT_CMD_VK(vkCmdEndRenderingKHR)
+#    define vkEndCommandBuffer                           DILIGENT_CMD_VK(vkEndCommandBuffer)
+#    define vkCmdBindPipeline                            DILIGENT_CMD_VK(vkCmdBindPipeline)
+#    define vkCmdSetViewport                             DILIGENT_CMD_VK(vkCmdSetViewport)
+#    define vkCmdSetScissor                              DILIGENT_CMD_VK(vkCmdSetScissor)
+#    define vkCmdSetStencilReference                     DILIGENT_CMD_VK(vkCmdSetStencilReference)
+#    define vkCmdSetBlendConstants                       DILIGENT_CMD_VK(vkCmdSetBlendConstants)
+#    define vkCmdBindIndexBuffer                         DILIGENT_CMD_VK(vkCmdBindIndexBuffer)
+#    define vkCmdBindVertexBuffers                       DILIGENT_CMD_VK(vkCmdBindVertexBuffers)
+#    define vkCmdBindDescriptorSets                      DILIGENT_CMD_VK(vkCmdBindDescriptorSets)
+#    define vkCmdPushConstants                           DILIGENT_CMD_VK(vkCmdPushConstants)
+#    define vkCmdCopyBuffer                              DILIGENT_CMD_VK(vkCmdCopyBuffer)
+#    define vkCmdCopyImage                               DILIGENT_CMD_VK(vkCmdCopyImage)
+#    define vkCmdCopyBufferToImage                       DILIGENT_CMD_VK(vkCmdCopyBufferToImage)
+#    define vkCmdCopyImageToBuffer                       DILIGENT_CMD_VK(vkCmdCopyImageToBuffer)
+#    define vkCmdBlitImage                               DILIGENT_CMD_VK(vkCmdBlitImage)
+#    define vkCmdResolveImage                            DILIGENT_CMD_VK(vkCmdResolveImage)
+#    define vkCmdBeginQuery                              DILIGENT_CMD_VK(vkCmdBeginQuery)
+#    define vkCmdEndQuery                                DILIGENT_CMD_VK(vkCmdEndQuery)
+#    define vkCmdWriteTimestamp                          DILIGENT_CMD_VK(vkCmdWriteTimestamp)
+#    define vkCmdResetQueryPool                          DILIGENT_CMD_VK(vkCmdResetQueryPool)
+#    define vkCmdCopyQueryPoolResults                    DILIGENT_CMD_VK(vkCmdCopyQueryPoolResults)
+#    define vkCmdBuildAccelerationStructuresKHR          DILIGENT_CMD_VK(vkCmdBuildAccelerationStructuresKHR)
+#    define vkCmdCopyAccelerationStructureKHR            DILIGENT_CMD_VK(vkCmdCopyAccelerationStructureKHR)
+#    define vkCmdWriteAccelerationStructuresPropertiesKHR DILIGENT_CMD_VK(vkCmdWriteAccelerationStructuresPropertiesKHR)
+#    define vkCmdTraceRaysKHR                            DILIGENT_CMD_VK(vkCmdTraceRaysKHR)
+#    define vkCmdTraceRaysIndirectKHR                    DILIGENT_CMD_VK(vkCmdTraceRaysIndirectKHR)
+#    define vkCmdSetFragmentShadingRateKHR               DILIGENT_CMD_VK(vkCmdSetFragmentShadingRateKHR)
+#    define vkCmdSetDeviceMaskKHR                        DILIGENT_CMD_VK(vkCmdSetDeviceMaskKHR)
+// VK_EXT_debug_utils command functions (vkCmdBeginDebugUtilsLabelEXT, vkCmdEndDebugUtilsLabelEXT,
+// vkCmdInsertDebugUtilsLabelEXT) come from an INSTANCE extension and are NOT part of VolkDeviceTable,
+// so they are left as global pointers (loaded by volkLoadInstance), which dispatch for any device.
+#endif
+
 class CommandBuffer
 {
 public:
@@ -274,6 +338,19 @@ public:
         vkCmdDispatch(m_VkCmdBuffer, GroupCountX, GroupCountY, GroupCountZ);
     }
 
+    // Linked multi-GPU (VK_KHR_device_group): sets the device mask that scopes all subsequent
+    // commands (draws, dispatches, acceleration-structure builds, ray tracing, copies) to the
+    // physical device(s) selected by DeviceMask. This must be recorded before any other command,
+    // i.e. right after the command buffer begins. Only meaningful when a device group is used;
+    // for single-GPU the caller must not invoke this (DeviceMask == 0 is treated as a no-op).
+    __forceinline void SetDeviceMask(uint32_t DeviceMask)
+    {
+        VERIFY_EXPR(m_VkCmdBuffer != VK_NULL_HANDLE);
+        if (DeviceMask == 0)
+            return;
+        vkCmdSetDeviceMaskKHR(m_VkCmdBuffer, DeviceMask);
+    }
+
     __forceinline void DispatchIndirect(VkBuffer Buffer, VkDeviceSize Offset)
     {
         VERIFY_EXPR(m_VkCmdBuffer != VK_NULL_HANDLE);
@@ -491,6 +568,13 @@ public:
                        VkAccessFlags        dstAccessMask,
                        VkPipelineStageFlags SrcStages,
                        VkPipelineStageFlags DestStages);
+
+    // Same dependency as MemoryBarrier(), going through the host stage. Unlike MemoryBarrier(),
+    // it is recorded immediately, after any pending barriers.
+    void MemoryBarrierThroughHost(VkAccessFlags        srcAccessMask,
+                                  VkAccessFlags        dstAccessMask,
+                                  VkPipelineStageFlags SrcStages,
+                                  VkPipelineStageFlags DestStages);
 
     __forceinline void BindDescriptorSets(VkPipelineBindPoint    pipelineBindPoint,
                                           VkPipelineLayout       layout,
@@ -823,6 +907,13 @@ public:
     }
     VkCommandBuffer GetVkCmdBuffer() const { return m_VkCmdBuffer; }
 
+#if DILIGENT_USE_VOLK
+    // Assigns the per-device function table used to dispatch command-buffer calls. Must be set to
+    // the owning device's table (LogicalDevice::GetVkTable()) before recording for optimized,
+    // multi-device-safe dispatch. If left null, calls use the global (trampolined) pointers.
+    void SetDeviceTable(const VolkDeviceTable* pVkTable) { m_pVkTable = pVkTable; }
+#endif
+
     VkPipelineStageFlags GetSupportedStagesMask() const { return m_Barrier.SupportedStagesMask; }
     VkAccessFlags        GetSupportedAccessMask() const { return m_Barrier.SupportedAccessMask; }
 
@@ -863,10 +954,66 @@ private:
     };
 
     VkCommandBuffer m_VkCmdBuffer = VK_NULL_HANDLE;
+#if DILIGENT_USE_VOLK
+    const VolkDeviceTable* m_pVkTable = nullptr;
+#endif
     StateCache      m_State;
     PipelineBarrier m_Barrier;
 
     std::vector<VkImageMemoryBarrier> m_ImageBarriers;
 };
+
+#if DILIGENT_USE_VOLK
+#    undef vkCmdClearColorImage
+#    undef vkCmdClearDepthStencilImage
+#    undef vkCmdClearAttachments
+#    undef vkCmdDraw
+#    undef vkCmdDrawIndexed
+#    undef vkCmdDrawIndirect
+#    undef vkCmdDrawIndexedIndirect
+#    undef vkCmdDrawIndirectCountKHR
+#    undef vkCmdDrawIndexedIndirectCountKHR
+#    undef vkCmdDrawMeshTasksEXT
+#    undef vkCmdDrawMeshTasksIndirectEXT
+#    undef vkCmdDrawMeshTasksIndirectCountEXT
+#    undef vkCmdDrawMultiEXT
+#    undef vkCmdDrawMultiIndexedEXT
+#    undef vkCmdDispatch
+#    undef vkCmdDispatchIndirect
+#    undef vkCmdBeginRenderPass
+#    undef vkCmdEndRenderPass
+#    undef vkCmdNextSubpass
+#    undef vkCmdBeginRenderingKHR
+#    undef vkCmdEndRenderingKHR
+#    undef vkEndCommandBuffer
+#    undef vkCmdBindPipeline
+#    undef vkCmdSetViewport
+#    undef vkCmdSetScissor
+#    undef vkCmdSetStencilReference
+#    undef vkCmdSetBlendConstants
+#    undef vkCmdBindIndexBuffer
+#    undef vkCmdBindVertexBuffers
+#    undef vkCmdBindDescriptorSets
+#    undef vkCmdPushConstants
+#    undef vkCmdCopyBuffer
+#    undef vkCmdCopyImage
+#    undef vkCmdCopyBufferToImage
+#    undef vkCmdCopyImageToBuffer
+#    undef vkCmdBlitImage
+#    undef vkCmdResolveImage
+#    undef vkCmdBeginQuery
+#    undef vkCmdEndQuery
+#    undef vkCmdWriteTimestamp
+#    undef vkCmdResetQueryPool
+#    undef vkCmdCopyQueryPoolResults
+#    undef vkCmdBuildAccelerationStructuresKHR
+#    undef vkCmdCopyAccelerationStructureKHR
+#    undef vkCmdWriteAccelerationStructuresPropertiesKHR
+#    undef vkCmdTraceRaysKHR
+#    undef vkCmdTraceRaysIndirectKHR
+#    undef vkCmdSetFragmentShadingRateKHR
+#    undef vkCmdSetDeviceMaskKHR
+#    undef DILIGENT_CMD_VK
+#endif
 
 } // namespace VulkanUtilities

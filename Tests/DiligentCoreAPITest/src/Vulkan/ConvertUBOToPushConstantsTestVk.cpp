@@ -134,10 +134,20 @@ layout(set = 0, binding = 0) uniform CB1
 
 layout(location = 0) out vec3 out_Color;
 
-// Helper function to access colors from the UBO
+// Helper function to access colors from the UBO.
+// The block becomes a push constant block, where arrays must only be accessed by dynamically uniform
+// indices (VUID-RuntimeSpirv-None-04745). gl_VertexIndex is not dynamically uniform, constants are.
 vec3 GetVertexColor(ColorData colors, int index)
 {
-    return colors.Colors[index].rgb;
+    switch (index)
+    {
+        case 0:  return colors.Colors[0].rgb;
+        case 1:  return colors.Colors[1].rgb;
+        case 2:  return colors.Colors[2].rgb;
+        case 3:  return colors.Colors[3].rgb;
+        case 4:  return colors.Colors[4].rgb;
+        default: return colors.Colors[5].rgb;
+    }
 }
 
 void main()
@@ -264,9 +274,19 @@ struct PSInput
 
 // Helper function to access colors from the CB
 // This tests OpFunctionCall handling in vertex shader
+// The block becomes a push constant block, where arrays must only be accessed by dynamically uniform
+// indices (VUID-RuntimeSpirv-None-04745). SV_VertexID is not dynamically uniform, constants are.
 float3 GetVertexColor(ColorData colors, uint index)
 {
-    return colors.Colors[index].rgb;
+    switch (index)
+    {
+        case 0:  return colors.Colors[0].rgb;
+        case 1:  return colors.Colors[1].rgb;
+        case 2:  return colors.Colors[2].rgb;
+        case 3:  return colors.Colors[3].rgb;
+        case 4:  return colors.Colors[4].rgb;
+        default: return colors.Colors[5].rgb;
+    }
 }
 
 PSInput main(uint VertexId : SV_VertexID)

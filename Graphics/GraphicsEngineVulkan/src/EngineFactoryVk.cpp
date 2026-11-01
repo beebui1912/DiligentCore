@@ -30,6 +30,10 @@
 
 #include "pch.h"
 #include <array>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <sstream>
 #include "EngineFactoryVk.h"
 #include "RenderDeviceVkImpl.hpp"
 #include "DeviceContextVkImpl.hpp"
@@ -149,7 +153,8 @@ private:
 };
 
 
-GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::PhysicalDevice& PhysicalDevice)
+GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::PhysicalDevice& PhysicalDevice,
+                                                        const VulkanUtilities::Instance*        Instance = nullptr)
 {
     GraphicsAdapterInfo AdapterInfo;
 
@@ -605,6 +610,54 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
         }
     }
 
+    // Multi-GPU: A single VkPhysicalDevice represents a single node.  When
+    // Instance is available, we query vkEnumeratePhysicalDeviceGroups here
+    // (rather than waiting until CreateDeviceAndContextsVk) so samples that
+    // read AdapterInfo.NodeCount from ModifyEngineInitInfo can decide
+    // upfront whether to opt into linked mode.
+    // Requested by DiligentGpuSimulation to align the Vulkan factory with
+    // the D3D12 one, which already fills NodeCount inside GetGraphicsAdapterInfo.
+    AdapterInfo.NodeCount = 1;
+    AdapterInfo.NodeMask  = 1;
+#if DILIGENT_USE_VOLK
+    if (Instance != nullptr)
+    {
+        uint32_t DeviceGroupCount = 0;
+        if (vkEnumeratePhysicalDeviceGroups(Instance->GetVkInstance(), &DeviceGroupCount, nullptr) == VK_SUCCESS && DeviceGroupCount > 0)
+        {
+            std::vector<VkPhysicalDeviceGroupProperties> DeviceGroups(DeviceGroupCount);
+            for (auto& G : DeviceGroups)
+            {
+                G.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GROUP_PROPERTIES;
+                G.pNext = nullptr;
+            }
+            if (vkEnumeratePhysicalDeviceGroups(Instance->GetVkInstance(), &DeviceGroupCount, DeviceGroups.data()) == VK_SUCCESS)
+            {
+                const VkPhysicalDevice ThisHandle = PhysicalDevice.GetVkDeviceHandle();
+                for (const auto& G : DeviceGroups)
+                {
+                    bool Match = false;
+                    for (uint32_t k = 0; k < G.physicalDeviceCount; ++k)
+                    {
+                        if (G.physicalDevices[k] == ThisHandle) { Match = true; break; }
+                    }
+                    if (Match && G.physicalDeviceCount > 1)
+                    {
+                        AdapterInfo.NodeCount = G.physicalDeviceCount;
+                        AdapterInfo.NodeMask  = G.physicalDeviceCount >= 32u ? ~0u : (1u << G.physicalDeviceCount) - 1u; // 1u << 32 is undefined
+                        // MaxDeviceContexts stays the queue family's queueCount, the number of
+                        // VkQueues. In linked mode it limits the contexts of each node: contexts on
+                        // different nodes share a VkQueue when the family has too few of them (see
+                        // SelectContextVkQueues()). vkCreateDevice never requests more queues than
+                        // the family has (VUID-VkDeviceQueueCreateInfo-queueCount-00382).
+                        break;
+                    }
+                }
+            }
+        }
+    }
+#endif
+
     return AdapterInfo;
 }
 
@@ -612,18 +665,15 @@ void EngineFactoryVkImpl::EnumerateAdapters(Version              MinVersion,
                                             Uint32&              NumAdapters,
                                             GraphicsAdapterInfo* Adapters) const
 {
-    if (m_wpDevice.IsValid())
-    {
-        LOG_ERROR_MESSAGE("We use global pointers to Vulkan functions and can not simultaneously create more than one instance and logical device.");
-        NumAdapters = 0;
-        return;
-    }
-
     VulkanUtilities::Instance::CreateInfo InstanceCI;
     // Create instance with the maximum available version.
     // If Volk is not enabled, the version will be 1.0.
     InstanceCI.ApiVersion             = VK_MAKE_VERSION(0xFF, 0xFF, 0);
     InstanceCI.EnableDeviceSimulation = m_EnableDeviceSimulation;
+    // The temporary instance only queries physical devices. While a device is alive, it must not reload
+    // volk's global device-level pointers: that would replace the pointers the device uses (bound to it
+    // by volkLoadDevice() when it is the only device) by slower loader trampolines.
+    InstanceCI.LoadDeviceFunctions = VulkanUtilities::LogicalDevice::GetLiveDeviceCount() == 0;
 
     std::shared_ptr<VulkanUtilities::Instance> Instance = VulkanUtilities::Instance::Create(InstanceCI);
 
@@ -638,7 +688,7 @@ void EngineFactoryVkImpl::EnumerateAdapters(Version              MinVersion,
     {
         std::unique_ptr<VulkanUtilities::PhysicalDevice> PhysicalDevice =
             VulkanUtilities::PhysicalDevice::Create({*Instance, Instance->GetVkPhysicalDevices()[i]});
-        Adapters[i] = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice);
+        Adapters[i] = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice, Instance.get());
     }
 }
 
@@ -679,6 +729,53 @@ VkResult CreateVulkanDeviceForOpenXR(const OpenXRAttribs&         XRAttribs,
 }
 #endif
 
+// Selects the VkQueue (index in its queue family) of every immediate context.
+//
+// A context gets a VkQueue of its own while the queue family has queues left, as on any device. In a
+// device group a VkQueue runs work on any physical device (every submission has its device mask), so
+// contexts on different nodes can then share one: a family with a single graphics queue can still host
+// a graphics context per node. Contexts on the same node never share a VkQueue.
+static std::vector<Uint32> SelectContextVkQueues(const EngineVkCreateInfo&                   EngineCI,
+                                                 const std::vector<VkQueueFamilyProperties>& QueueProperties,
+                                                 uint32_t                                    DeviceGroupSize)
+{
+    std::vector<Uint32> ContextVkQueues(EngineCI.NumImmediateContexts);
+    // Masks of the nodes that use each VkQueue of each queue family
+    std::vector<std::vector<uint32_t>> VkQueueNodes(QueueProperties.size());
+    for (Uint32 CtxInd = 0; CtxInd < EngineCI.NumImmediateContexts; ++CtxInd)
+    {
+        const ImmediateContextCreateInfo& ContextInfo = EngineCI.pImmediateContextInfo[CtxInd];
+        std::vector<uint32_t>&            FamilyQueues = VkQueueNodes[ContextInfo.QueueId];
+        const uint32_t                    NodeBit      = DeviceGroupSize > 1 ? 1u << ContextInfo.NodeIndex : 1u;
+
+        Uint32 VkQueueInd = ~0u;
+        if (FamilyQueues.size() < QueueProperties[ContextInfo.QueueId].queueCount)
+        {
+            VkQueueInd = static_cast<Uint32>(FamilyQueues.size());
+            FamilyQueues.push_back(0);
+        }
+        else if (DeviceGroupSize > 1)
+        {
+            for (Uint32 q = 0; q < FamilyQueues.size() && VkQueueInd == ~0u; ++q)
+            {
+                if ((FamilyQueues[q] & NodeBit) == 0)
+                    VkQueueInd = q;
+            }
+        }
+
+        if (VkQueueInd == ~0u)
+        {
+            LOG_ERROR_AND_THROW("Immediate context '", (ContextInfo.Name != nullptr ? ContextInfo.Name : ""), "' needs another queue of family ",
+                                Uint32{ContextInfo.QueueId}, ", which has ", QueueProperties[ContextInfo.QueueId].queueCount, " queue(s)",
+                                (DeviceGroupSize > 1 ? " per node." : ", and the device group was not created."));
+        }
+
+        FamilyQueues[VkQueueInd] |= NodeBit;
+        ContextVkQueues[CtxInd] = VkQueueInd;
+    }
+    return ContextVkQueues;
+}
+
 void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& EngineCI,
                                                     IRenderDevice**           ppDevice,
                                                     IDeviceContext**          ppContexts)
@@ -698,8 +795,15 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
 
     if (m_wpDevice.IsValid())
     {
-        LOG_ERROR_MESSAGE("We use global pointers to Vulkan functions and can not simultaneously create more than one instance and logical device.");
-        return;
+        // Diligent uses volk, which maintains a single global Vulkan function-pointer table.
+        // Creating more than one device is supported: the additional device relies on the
+        // instance-level (trampolined) function pointers loaded by volkLoadInstance(), which
+        // dispatch correctly for every device (see VulkanUtilities::LogicalDevice). The only cost
+        // is a small per-call overhead because the per-device optimization (volkLoadDevice) can be
+        // applied to a single device at a time.
+        LOG_INFO_MESSAGE("Creating an additional Vulkan render device in the same process. "
+                         "Vulkan device function calls will use non-optimized (trampolined) global "
+                         "pointers while more than one device is alive.");
     }
 
     try
@@ -761,7 +865,7 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
             LOG_WARNING_MESSAGE(VK_KHR_MAINTENANCE1_EXTENSION_NAME, " is not supported.");
 
         // Enable device features if they are supported and throw an error if not supported, but required by user.
-        const GraphicsAdapterInfo AdapterInfo = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice);
+        GraphicsAdapterInfo AdapterInfo = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice, Instance.get());
         VerifyEngineCreateInfo(EngineCI, AdapterInfo);
         const DeviceFeatures   EnabledFeatures   = EnableDeviceFeatures(AdapterInfo.Features, EngineCI.Features);
         const DeviceFeaturesVk AdapterFeaturesVk = PhysicalDeviceFeaturesToDeviceFeaturesVk(PhysicalDevice->GetExtFeatures(), DEVICE_FEATURE_STATE_OPTIONAL);
@@ -1355,6 +1459,121 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
                 DeviceExtensions.push_back(EngineCI.ppDeviceExtensionNames[i]);
         }
 
+        // Multi-GPU: Enable VK_KHR_device_group and chain VkDeviceGroupDeviceCreateInfo if linked mode is requested.
+        VkDeviceGroupDeviceCreateInfo DeviceGroupCI{};
+        DeviceGroupCI.sType = VK_STRUCTURE_TYPE_DEVICE_GROUP_DEVICE_CREATE_INFO;
+        std::vector<VkPhysicalDevice> DeviceGroupPhysDevices;
+
+        if (EngineCI.GpuMode == GPU_MODE_LINKED &&
+            Instance->IsExtensionEnabled(VK_KHR_DEVICE_GROUP_CREATION_EXTENSION_NAME) &&
+            PhysicalDevice->IsExtensionSupported(VK_KHR_DEVICE_GROUP_EXTENSION_NAME))
+        {
+#if DILIGENT_USE_VOLK
+            uint32_t DeviceGroupCount = 0;
+            VkResult grpRes = vkEnumeratePhysicalDeviceGroups(Instance->GetVkInstance(), &DeviceGroupCount, nullptr);
+            if (grpRes == VK_SUCCESS && DeviceGroupCount > 0)
+            {
+                std::vector<VkPhysicalDeviceGroupProperties> GroupProps(DeviceGroupCount);
+                for (auto& gp : GroupProps)
+                {
+                    gp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GROUP_PROPERTIES;
+                    gp.pNext = nullptr;
+                }
+                grpRes = vkEnumeratePhysicalDeviceGroups(Instance->GetVkInstance(), &DeviceGroupCount, GroupProps.data());
+                if (grpRes == VK_SUCCESS)
+                {
+                    // Find the group containing our selected physical device
+                    for (uint32_t g = 0; g < DeviceGroupCount; ++g)
+                    {
+                        const VkPhysicalDeviceGroupProperties& Group = GroupProps[g];
+                        for (uint32_t d = 0; d < Group.physicalDeviceCount; ++d)
+                        {
+                            if (Group.physicalDevices[d] == PhysicalDevice->GetVkDeviceHandle())
+                            {
+                                if (Group.physicalDeviceCount > 1)
+                                {
+                                    DeviceGroupPhysDevices.assign(Group.physicalDevices,
+                                                                  Group.physicalDevices + Group.physicalDeviceCount);
+                                    DeviceGroupCI.physicalDeviceCount = Group.physicalDeviceCount;
+                                    DeviceGroupCI.pPhysicalDevices    = DeviceGroupPhysDevices.data();
+                                    DeviceGroupCI.pNext               = vkDeviceCreateInfo.pNext;
+                                    vkDeviceCreateInfo.pNext          = &DeviceGroupCI;
+
+                                    DeviceExtensions.push_back(VK_KHR_DEVICE_GROUP_EXTENSION_NAME);
+
+                                    LOG_INFO_MESSAGE("Vulkan linked multi-GPU: device group with ",
+                                                     Group.physicalDeviceCount, " physical devices detected.");
+                                }
+                                else
+                                {
+                                    LOG_WARNING_MESSAGE("GPU_MODE_LINKED requested but device group has only 1 physical device. "
+                                                       "Falling back to single-GPU behavior.");
+                                }
+                                goto device_group_search_done;
+                            }
+                        }
+                    }
+                    LOG_WARNING_MESSAGE("GPU_MODE_LINKED requested but selected physical device was not found in any device group.");
+                }
+            }
+            else
+            {
+                LOG_WARNING_MESSAGE("GPU_MODE_LINKED requested but vkEnumeratePhysicalDeviceGroups failed or returned 0 groups.");
+            }
+        device_group_search_done:;
+            // Update adapter info with actual node count from device group
+            if (DeviceGroupCI.physicalDeviceCount > 1)
+            {
+                AdapterInfo.NodeCount = DeviceGroupCI.physicalDeviceCount;
+                AdapterInfo.NodeMask  = DeviceGroupCI.physicalDeviceCount >= 32u ? ~0u : (1u << DeviceGroupCI.physicalDeviceCount) - 1u; // 1u << 32 is undefined
+            }
+#else
+            LOG_WARNING_MESSAGE("GPU_MODE_LINKED requires Volk for vkEnumeratePhysicalDeviceGroups. Falling back to single-GPU.");
+#endif
+        }
+
+        // Number of physical devices of the logical device: more than one only if the device group was created.
+        // Everything that is specific to device groups (device masks, device indices, peer memory) keys off
+        // this value, not off the requested mode or the adapter's node count, so a device created without a
+        // group (single or unlinked mode, or a linked request that fell back) behaves like an ordinary device.
+        const uint32_t DeviceGroupSize = DeviceGroupCI.physicalDeviceCount > 1 ? DeviceGroupCI.physicalDeviceCount : 1u;
+        if (DeviceGroupSize > 1)
+        {
+            // A context's node selects the physical device its command buffers run on (as the queue node mask in D3D12)
+            for (Uint32 CtxInd = 0; CtxInd < EngineCI.NumImmediateContexts; ++CtxInd)
+            {
+                const ImmediateContextCreateInfo& ContextInfo = EngineCI.pImmediateContextInfo[CtxInd];
+                if (ContextInfo.NodeIndex >= DeviceGroupSize)
+                {
+                    LOG_ERROR_AND_THROW("Immediate context '", (ContextInfo.Name != nullptr ? ContextInfo.Name : ""), "' requests node ",
+                                        Uint32{ContextInfo.NodeIndex}, ", but the device group has ", DeviceGroupSize, " physical device(s)");
+                }
+            }
+
+            // Peer memory binding (VkBind*MemoryDeviceGroupInfo) needs vkBind*Memory2: core in Vulkan 1.1
+            const uint32_t vkDeviceVersion = PhysicalDevice->GetVkVersion();
+            if (Version{VK_VERSION_MAJOR(vkDeviceVersion), VK_VERSION_MINOR(vkDeviceVersion)} < Version{1, 1} &&
+                PhysicalDevice->IsExtensionSupported(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME))
+            {
+                DeviceExtensions.push_back(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
+            }
+        }
+
+        // The number of VkQueues to create follows from the queue of every immediate context
+        std::vector<Uint32> ContextVkQueues;
+        if (EngineCI.NumImmediateContexts > 0)
+        {
+            ContextVkQueues = SelectContextVkQueues(EngineCI, PhysicalDevice->GetQueueProperties(), DeviceGroupSize);
+
+            for (VkDeviceQueueCreateInfo& QueueCI : QueueInfos)
+                QueueCI.queueCount = 0;
+            for (Uint32 CtxInd = 0; CtxInd < EngineCI.NumImmediateContexts; ++CtxInd)
+            {
+                VkDeviceQueueCreateInfo& QueueCI = QueueInfos[QueueIDtoQueueInfo[EngineCI.pImmediateContextInfo[CtxInd].QueueId]];
+                QueueCI.queueCount               = std::max(QueueCI.queueCount, ContextVkQueues[CtxInd] + 1);
+            }
+        }
+
         vkDeviceCreateInfo.ppEnabledExtensionNames = DeviceExtensions.empty() ? nullptr : DeviceExtensions.data();
         vkDeviceCreateInfo.enabledExtensionCount   = static_cast<uint32_t>(DeviceExtensions.size());
 
@@ -1379,7 +1598,38 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
             *vkDeviceCreateInfo.pEnabledFeatures,
             EnabledExtFeats,
             vkAllocator,
+            DeviceGroupSize,
         });
+
+        if (LogicalDevice->IsDeviceGroup())
+        {
+            // How each device can use another device's instance of device-local memory. Resources with
+            // CreationNodeMask / VisibleNodeMask are bound for such peer access.
+            const VkPhysicalDeviceMemoryProperties& MemProps = PhysicalDevice->GetMemoryProperties();
+            for (uint32_t Type = 0; Type < MemProps.memoryTypeCount; ++Type)
+            {
+                if (MemProps.memoryTypes[Type].propertyFlags != VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT || !LogicalDevice->IsMultiInstanceMemoryType(Type))
+                    continue;
+
+                std::stringstream ss;
+                for (uint32_t Local = 0; Local < DeviceGroupSize; ++Local)
+                {
+                    for (uint32_t Remote = 0; Remote < DeviceGroupSize; ++Remote)
+                    {
+                        if (Local == Remote)
+                            continue;
+                        const VkPeerMemoryFeatureFlags Features = LogicalDevice->GetPeerMemoryFeatures(Type, Local, Remote);
+                        ss << "\n  device " << Local << " -> memory of device " << Remote << ':'
+                           << ((Features & VK_PEER_MEMORY_FEATURE_COPY_SRC_BIT) ? " COPY_SRC" : "")
+                           << ((Features & VK_PEER_MEMORY_FEATURE_COPY_DST_BIT) ? " COPY_DST" : "")
+                           << ((Features & VK_PEER_MEMORY_FEATURE_GENERIC_SRC_BIT) ? " GENERIC_SRC" : "")
+                           << ((Features & VK_PEER_MEMORY_FEATURE_GENERIC_DST_BIT) ? " GENERIC_DST" : "");
+                    }
+                }
+                LOG_INFO_MESSAGE("Vulkan linked multi-GPU: peer memory features of heap ", MemProps.memoryTypes[Type].heapIndex, ':', ss.str());
+                break;
+            }
+        }
 
         IMemoryAllocator& RawMemAllocator = GetRawAllocator();
 
@@ -1388,19 +1638,28 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
 
         if (EngineCI.NumImmediateContexts > 0)
         {
-            for (Uint32 QInd = 0; QInd < QueueInfos.size(); ++QInd)
-                QueueInfos[QInd].queueCount = 0;
+            // Access to a VkQueue must be externally synchronized: command queues that share a VkQueue share its lock
+            std::map<std::pair<Uint32, Uint32>, std::shared_ptr<std::mutex>> VkQueueMutexes;
 
             for (Uint32 CtxInd = 0; CtxInd < CommandQueuesVk.size(); ++CtxInd)
             {
                 const ImmediateContextCreateInfo& ContextInfo = EngineCI.pImmediateContextInfo[CtxInd];
-                const Uint8                       QueueIndex  = QueueIDtoQueueInfo[ContextInfo.QueueId];
-                VERIFY_EXPR(QueueIndex != DEFAULT_QUEUE_ID);
-                VkDeviceQueueCreateInfo& QueueCI = QueueInfos[QueueIndex];
+                VERIFY_EXPR(QueueIDtoQueueInfo[ContextInfo.QueueId] != DEFAULT_QUEUE_ID);
 
-                CommandQueuesVk[CtxInd] = NEW_RC_OBJ(RawMemAllocator, "CommandQueueVk instance", CommandQueueVkImpl)(LogicalDevice, SoftwareQueueIndex{CtxInd}, EngineCI.NumImmediateContexts, QueueCI.queueCount, ContextInfo);
+                std::shared_ptr<std::mutex>& pVkQueueMutex = VkQueueMutexes[std::make_pair(Uint32{ContextInfo.QueueId}, ContextVkQueues[CtxInd])];
+                if (!pVkQueueMutex)
+                {
+                    pVkQueueMutex = std::make_shared<std::mutex>();
+                }
+                else
+                {
+                    LOG_INFO_MESSAGE("Vulkan linked multi-GPU: immediate context '", (ContextInfo.Name != nullptr ? ContextInfo.Name : ""), "' on node ", Uint32{ContextInfo.NodeIndex},
+                                     " shares queue ", ContextVkQueues[CtxInd], " of family ", Uint32{ContextInfo.QueueId},
+                                     " with a context on another node. A context can not wait for a fence value that the other one has not submitted yet.");
+                }
+
+                CommandQueuesVk[CtxInd] = NEW_RC_OBJ(RawMemAllocator, "CommandQueueVk instance", CommandQueueVkImpl)(LogicalDevice, SoftwareQueueIndex{CtxInd}, EngineCI.NumImmediateContexts, ContextVkQueues[CtxInd], ContextInfo, LogicalDevice->IsDeviceGroup(), pVkQueueMutex);
                 CommandQueues[CtxInd]   = CommandQueuesVk[CtxInd];
-                QueueCI.queueCount += 1;
             }
         }
         else
@@ -1410,7 +1669,7 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
             DefaultContextInfo.Name    = "Graphics context";
             DefaultContextInfo.QueueId = static_cast<Uint8>(QueueInfos[0].queueFamilyIndex);
 
-            CommandQueuesVk[0] = NEW_RC_OBJ(RawMemAllocator, "CommandQueueVk instance", CommandQueueVkImpl)(LogicalDevice, SoftwareQueueIndex{0}, 1u, 1u, DefaultContextInfo);
+            CommandQueuesVk[0] = NEW_RC_OBJ(RawMemAllocator, "CommandQueueVk instance", CommandQueueVkImpl)(LogicalDevice, SoftwareQueueIndex{0}, 1u, 1u, DefaultContextInfo, LogicalDevice->IsDeviceGroup());
             CommandQueues[0]   = CommandQueuesVk[0];
         }
 
@@ -1486,6 +1745,9 @@ void EngineFactoryVkImpl::AttachToVulkanDevice(std::shared_ptr<VulkanUtilities::
             const uint32_t           QueueId    = ppCommandQueues[CtxInd]->GetQueueFamilyIndex();
             const auto&              QueueProps = pRenderDeviceVk->GetPhysicalDevice().GetQueueProperties();
             const COMMAND_QUEUE_TYPE QueueType  = VkQueueFlagsToCmdQueueType(QueueProps[QueueId].queueFlags);
+            // The node only has a meaning on a device group (validated in CreateDeviceAndContextsVk()); elsewhere
+            // every context is on node 0, as in D3D12 outside of linked mode.
+            const Uint32 NodeIndex = (LogicalDevice->IsDeviceGroup() && EngineCI.NumImmediateContexts > 0) ? pImmediateContextInfo[CtxInd].NodeIndex : 0u;
 
             RefCntAutoPtr<DeviceContextVkImpl> pImmediateCtxVk{
                 NEW_RC_OBJ(RawMemAllocator, "DeviceContextVkImpl instance", DeviceContextVkImpl)(
@@ -1493,9 +1755,10 @@ void EngineFactoryVkImpl::AttachToVulkanDevice(std::shared_ptr<VulkanUtilities::
                     DeviceContextDesc{
                         pImmediateContextInfo[CtxInd].Name,
                         QueueType,
-                        false,   // IsDeferred
-                        CtxInd,  // Context id
-                        QueueId} //
+                        false,      // IsDeferred
+                        CtxInd,     // Context id
+                        QueueId,    // Queue id
+                        NodeIndex}  // Node index (multi-GPU)
                     )};
             // We must call AddRef() (implicitly through QueryInterface()) because pRenderDeviceVk will
             // keep a weak reference to the context
