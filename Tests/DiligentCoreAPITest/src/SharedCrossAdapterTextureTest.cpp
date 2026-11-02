@@ -153,9 +153,6 @@ TEST(SharedCrossAdapterBuffer, NoHeapWithoutFlag)
     ASSERT_NE(pBufferD3D12, nullptr);
     EXPECT_EQ(pBufferD3D12->GetD3D12SharedHeap(), nullptr);
 }
-#endif
-
-#if D3D12_SUPPORTED
 
 // The sharing path on one device: the handle is the same for a device on another adapter
 TEST(SharedCrossAdapterBuffer, CopyThroughSharedHandle)
