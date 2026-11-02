@@ -40,8 +40,14 @@ namespace Diligent
 
 /// Helper class for pipelined inter-GPU resource transfer in Unlinked Multi-GPU configurations.
 ///
-/// When both devices can share memory, the GPUs copy the frame through that memory and the CPU only
-/// waits for fences (see TransferMode). Otherwise the CPU copies every frame between staging textures.
+/// When both devices can share memory, the GPUs copy the frame through that memory (see TransferMode).
+/// Otherwise the CPU copies every frame between staging textures.
+///
+/// When the devices share memory, they are synchronized in one of two ways:
+/// * On the GPU, if they can also share fences (CreateCrossDeviceFence()): each device's queue waits for
+///   the other device's signal, and the CPU never blocks (UsesGpuSynchronization() returns true).
+/// * Otherwise the CPU waits for the fence of one device before it submits the work of the other.
+/// The choice is made at run time, so the same code runs on every platform and backend.
 class CrossDeviceTransferManager
 {
 public:
@@ -78,6 +84,7 @@ public:
         /// Shared modes: the destination device's texture in the same shared memory.
         RefCntAutoPtr<ITexture> pPrimaryStagingUpload;
 
+        /// Signaled on the source device after the copy into pSecondaryStagingReadback.
         RefCntAutoPtr<IFence> pSecondaryFence;
         Uint64                FenceValue = 0;
 
@@ -86,6 +93,14 @@ public:
         /// while that copy is still pending.
         RefCntAutoPtr<IFence> pPrimaryFence;
         Uint64                PrimaryFenceValue = 0;
+
+        /// GPU synchronization only: the destination device's fence that shares pSecondaryFence.
+        /// The destination queue waits for it before the copy out of pPrimaryStagingUpload.
+        RefCntAutoPtr<IFence> pSecondaryFenceOnDst;
+
+        /// GPU synchronization only: the source device's fence that shares pPrimaryFence.
+        /// The source queue waits for it before the copy into pSecondaryStagingReadback.
+        RefCntAutoPtr<IFence> pPrimaryFenceOnSrc;
     };
 
     CrossDeviceTransferManager() noexcept = default;
@@ -100,16 +115,22 @@ public:
     /// \param [in] AllowSharedMemory - Whether the devices may share memory (TransferMode::SharedHostMemory or
     ///                                 TransferMode::SharedCrossAdapterTexture). If false, or if the devices can not
     ///                                 share memory, the CPU copies the frames (TransferMode::CpuCopy).
+    /// \param [in] AllowGpuSynchronization - Whether the devices may share fences to synchronize on the GPU when they
+    ///                                 share memory (see UsesGpuSynchronization()). If false, or if the devices can not
+    ///                                 share fences, the CPU waits for the fences.
     void Init(IRenderDevice*     pSrcDevice,
               IRenderDevice*     pDstDevice,
               const TextureDesc& Desc,
-              Uint32             FrameLatency      = 2,
-              bool               AllowSharedMemory = true);
+              Uint32             FrameLatency            = 2,
+              bool               AllowSharedMemory       = true,
+              bool               AllowGpuSynchronization = true);
 
     /// Records a copy of the source render target to the transfer memory on the source GPU.
     ///
-    /// In the shared modes, the CPU waits until the destination GPU has finished reading the slot
-    /// FrameLatency transfers ago (usually completed already).
+    /// In the shared modes, the copy must wait until the destination GPU has finished reading the slot
+    /// FrameLatency transfers ago (usually completed already). With GPU synchronization the source queue
+    /// waits; the wait applies to the whole submission, including the commands recorded before this call.
+    /// Otherwise the CPU waits.
     ///
     /// \param [in] pSrcContext - Pointer to the source device context.
     /// \param [in] pSrcTexture - Pointer to the source texture/render target to copy from.
@@ -120,9 +141,10 @@ public:
 
     /// Uploads the transferred frame data into the destination texture on the destination GPU.
     ///
-    /// The CPU waits until the source GPU has finished the copy of the frame. In the shared modes, the
-    /// destination GPU then copies the frame out of the shared memory and the destination context is flushed;
-    /// the CPU does not access the frame data.
+    /// The upload must wait until the source GPU has finished the copy of the frame: with GPU synchronization
+    /// the destination queue waits, otherwise the CPU waits. In the shared modes, the destination GPU then copies
+    /// the frame out of the shared memory and the destination context is flushed; the CPU does not access the
+    /// frame data.
     ///
     /// \param [in] pSrcContext    - Pointer to the source device context (needed to map the readback staging texture).
     /// \param [in] pDstContext    - Pointer to the destination device context.
@@ -149,6 +171,10 @@ public:
     /// Returns how the frame data moves between the devices.
     TransferMode GetTransferMode() const { return m_Mode; }
 
+    /// Returns true if the devices wait for each other on the GPU through shared fences,
+    /// and false if the CPU waits for the fences.
+    bool UsesGpuSynchronization() const { return m_GpuSync; }
+
 private:
     bool IsSharedMode() const { return m_Mode == TransferMode::SharedHostMemory || m_Mode == TransferMode::SharedCrossAdapterTexture; }
 
@@ -158,6 +184,7 @@ private:
     Uint32                           m_Latency     = 2;
     bool                             m_Initialized = false;
     TransferMode                     m_Mode        = TransferMode::None;
+    bool                             m_GpuSync     = false;
     std::vector<FrameBufferTransfer> m_Buffers;
     std::mutex                       m_Mtx;
 };

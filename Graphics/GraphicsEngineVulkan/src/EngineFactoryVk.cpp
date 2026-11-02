@@ -1412,6 +1412,16 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
                 EnabledExtFeats.ExternalMemoryHost = true;
             }
 
+            // Unlinked multi-GPU: timeline semaphores that another device on the same physical device imports, so
+            // that the devices synchronize on the GPU (IRenderDeviceVk::CreateSharedFence). The extension that
+            // exports the platform's handles (Win32 handles on Windows, file descriptors elsewhere) has no feature
+            // structure; VK_KHR_external_semaphore is core in Vulkan 1.1.
+            if (DeviceExtFeatures.ExternalSemaphore)
+            {
+                DeviceExtensions.push_back(VulkanUtilities::ExternalSemaphoreExtensionName);
+                EnabledExtFeats.ExternalSemaphore = true;
+            }
+
             // Append user-defined features
             *NextExt = EngineCI.pDeviceExtensionFeatures;
         }

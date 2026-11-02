@@ -217,6 +217,15 @@ public:
                                                                          RESOURCE_STATE     InitialState,
                                                                          ITexture**         ppTexture) override final;
 
+    /// Implementation of IRenderDeviceD3D12::CreateSharedFence().
+    virtual Bool DILIGENT_CALL_TYPE CreateSharedFence(IRenderDevice*   pOtherDevice,
+                                                      const FenceDesc& Desc,
+                                                      IFence**         ppFence,
+                                                      IFence**         ppOtherFence) override final;
+
+    // Creates a fence object for an existing D3D12 fence (e.g. a fence shared with another device)
+    void CreateFenceFromD3D12Fence(ID3D12Fence* pd3d12Fence, const FenceDesc& Desc, IFence** ppFence);
+
     void CreateRootSignature(const RefCntAutoPtr<class PipelineResourceSignatureD3D12Impl>* ppSignatures, Uint32 SignatureCount, size_t Hash, RootSignatureD3D12** ppRootSig);
 
     RootSignatureCacheD3D12& GetRootSignatureCache() { return m_RootSignatureCache; }

@@ -58,6 +58,7 @@ Below are some of the methods that provide access to internal Direct3D12 objects
 | `IRenderDeviceD3D12::CreateBufferFromD3DResource`  | creates a Diligent Engine buffer object from the native Direct3D12 resource. The method takes a pointer to the native Direct3D12 resource `pd3d12Buffer`, buffer description `BuffDesc` and writes a pointer to the `IBuffer` interface at the memory location pointed to by `ppBuffer`. The system can recover buffer size, but the rest of the fields of `BuffDesc` structure need to be populated by the client as they cannot be recovered from Direct3D12 resource description. |
 | `IRenderDeviceD3D12::CreateBLASFromD3DResource`    | creates a Diligent Engine bottom-level acceleration structure from the native Direct3D12 resource |
 | `IRenderDeviceD3D12::CreateTLASFromD3DResource`    | creates a Diligent Engine top-level acceleration structure from the native Direct3D12 resource |
+| `IRenderDeviceD3D12::CreateSharedFence`            | creates fences of this device and of another Direct3D12 device (on the same or another adapter) that share one `ID3D12Fence`, so that the devices wait for each other on the GPU |
 
 
 ### Initializing the Engine by Attaching to Existing D3D12 Device

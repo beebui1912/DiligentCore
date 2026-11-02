@@ -269,6 +269,15 @@ public:
                                                                 IObject*           pHostMemoryOwner,
                                                                 ITexture**         ppTexture) override final;
 
+    /// Implementation of IRenderDeviceVk::CreateSharedFence().
+    virtual Bool DILIGENT_CALL_TYPE CreateSharedFence(IRenderDevice*   pOtherDevice,
+                                                      const FenceDesc& Desc,
+                                                      IFence**         ppFence,
+                                                      IFence**         ppOtherFence) override final;
+
+    // Creates a fence that owns the timeline semaphore
+    void CreateFenceFromTimelineSemaphore(VulkanUtilities::SemaphoreWrapper&& TimelineSemaphore, const FenceDesc& Desc, IFence** ppFence);
+
     DescriptorSetAllocation AllocateDescriptorSet(Uint64 CommandQueueMask, VkDescriptorSetLayout SetLayout, const char* DebugName = "")
     {
         return m_DescriptorSetAllocator.Allocate(CommandQueueMask, SetLayout, DebugName);

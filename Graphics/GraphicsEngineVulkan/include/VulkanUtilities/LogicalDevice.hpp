@@ -183,7 +183,8 @@ public:
     DescriptorSetLayoutWrapper CreateDescriptorSetLayout(const VkDescriptorSetLayoutCreateInfo& LayoutCI,       const char* DebugName = "") const;
 
     SemaphoreWrapper    CreateSemaphore(const VkSemaphoreCreateInfo& SemaphoreCI, const char* DebugName = "") const;
-    SemaphoreWrapper    CreateTimelineSemaphore(uint64_t InitialValue, const char* DebugName = "") const;
+    // Exportable: the payload can be shared with another device (ShareSemaphore()), requires ExtensionFeatures::ExternalSemaphore
+    SemaphoreWrapper    CreateTimelineSemaphore(uint64_t InitialValue, const char* DebugName = "", bool Exportable = false) const;
     QueryPoolWrapper    CreateQueryPool(const VkQueryPoolCreateInfo& QueryPoolCI, const char* DebugName = "") const;
     AccelStructWrapper  CreateAccelStruct(const VkAccelerationStructureCreateInfoKHR& CI, const char* DebugName = "") const;
 
@@ -235,6 +236,14 @@ public:
     // VK_EXT_external_memory_host: the memory types into which the host allocation can be imported.
     // Returns VK_ERROR_EXTENSION_NOT_PRESENT if the extension is not enabled.
     VkResult GetMemoryHostPointerProperties(const void* pHostPointer, VkMemoryHostPointerPropertiesEXT& Properties) const;
+
+    // Exports the payload of Semaphore, a timeline semaphore of this device created as exportable, through
+    // ExternalSemaphoreHandleType, and permanently imports it into ImportingSemaphore, a timeline semaphore of
+    // ImportingDevice. Both semaphores then refer to one payload. The handle is closed (Windows) or owned by the
+    // implementation (file descriptors) when the function returns.
+    // The devices must use the same physical device and driver (equal VkPhysicalDeviceIDProperties::deviceUUID and
+    // driverUUID). Returns VK_ERROR_EXTENSION_NOT_PRESENT if a device does not have ExternalSemaphore enabled.
+    VkResult ShareSemaphore(VkSemaphore Semaphore, const LogicalDevice& ImportingDevice, VkSemaphore ImportingSemaphore) const;
 
     VkResult InvalidateMappedMemoryRanges(uint32_t memoryRangeCount, const VkMappedMemoryRange* pMemoryRanges) const;
     VkResult FlushMappedMemoryRanges(uint32_t memoryRangeCount, const VkMappedMemoryRange* pMemoryRanges) const;
@@ -301,6 +310,14 @@ private:
                                                              const VkObjectCreateInfoType& CreateInfo,
                                                              const char*                   DebugName,
                                                              const char*                   ObjectType) const;
+
+#if DILIGENT_USE_VOLK
+#    if defined(VK_USE_PLATFORM_WIN32_KHR)
+    VkResult ShareSemaphoreWin32(VkSemaphore Semaphore, const LogicalDevice& ImportingDevice, VkSemaphore ImportingSemaphore) const;
+#    endif
+    // Used on the platforms other than Windows. Compiled on every platform, so that this code is built everywhere.
+    VkResult ShareSemaphoreFd(VkSemaphore Semaphore, const LogicalDevice& ImportingDevice, VkSemaphore ImportingSemaphore) const;
+#endif
 
     VkDevice                           m_VkDevice = VK_NULL_HANDLE;
     const VkAllocationCallbacks* const m_VkAllocator;

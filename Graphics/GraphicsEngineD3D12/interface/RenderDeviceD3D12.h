@@ -144,6 +144,30 @@ DILIGENT_BEGIN_INTERFACE(IRenderDeviceD3D12, IRenderDevice)
                                                               const TextureDesc REF TexDesc,
                                                               RESOURCE_STATE        InitialState,
                                                               ITexture**            ppTexture) PURE;
+
+    /// Creates a fence of this device and a fence of another Direct3D12 device that share one ID3D12Fence,
+    /// so that the devices synchronize on the GPU.
+
+    /// \param [in]  pOtherDevice - The other Direct3D12 device. It may use the same adapter or another adapter.
+    /// \param [in]  Desc         - Fence description. The type must be Diligent::FENCE_TYPE_GENERAL.
+    /// \param [out] ppFence      - Address of the memory location where the pointer to the fence of this
+    ///                             device will be stored. The function calls AddRef().
+    /// \param [out] ppOtherFence - Address of the memory location where the pointer to the fence of
+    ///                             pOtherDevice will be stored. The function calls AddRef().
+    /// \return True if the fences were created, and false otherwise. The outputs are null in that case.
+    ///
+    /// \remarks Both fences have the same value. Either fence can be signaled (IDeviceContext::EnqueueSignal(),
+    ///          IFence::Signal()) and waited for (IDeviceContext::DeviceWaitForFence(), IFence::Wait()), so a
+    ///          queue of one device can wait on the GPU for work that a queue of the other device signals.
+    ///
+    ///          The fence is created with D3D12_FENCE_FLAG_SHARED, and also with D3D12_FENCE_FLAG_SHARED_CROSS_ADAPTER
+    ///          if the devices use different adapters, and the other device opens it with a shared handle.
+    ///          Both devices must have the NativeFence feature enabled.
+    VIRTUAL Bool METHOD(CreateSharedFence)(THIS_
+                                           IRenderDevice*      pOtherDevice,
+                                           const FenceDesc REF Desc,
+                                           IFence**            ppFence,
+                                           IFence**            ppOtherFence) PURE;
 };
 DILIGENT_END_INTERFACE
 
@@ -160,6 +184,7 @@ DILIGENT_END_INTERFACE
 #    define IRenderDeviceD3D12_CreateTLASFromD3DResource(This, ...)    CALL_IFACE_METHOD(RenderDeviceD3D12, CreateTLASFromD3DResource,    This, __VA_ARGS__)
 #    define IRenderDeviceD3D12_GetDXCompiler(This)                     CALL_IFACE_METHOD(RenderDeviceD3D12, GetDXCompiler,                This)
 #    define IRenderDeviceD3D12_CreateTextureFromD3DResourceWithDesc(This, ...) CALL_IFACE_METHOD(RenderDeviceD3D12, CreateTextureFromD3DResourceWithDesc, This, __VA_ARGS__)
+#    define IRenderDeviceD3D12_CreateSharedFence(This, ...)            CALL_IFACE_METHOD(RenderDeviceD3D12, CreateSharedFence,            This, __VA_ARGS__)
 // clang-format on
 
 #endif

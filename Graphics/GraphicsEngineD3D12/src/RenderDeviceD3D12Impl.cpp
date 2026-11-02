@@ -674,6 +674,91 @@ void RenderDeviceD3D12Impl::CreateTextureFromD3DResourceWithDesc(ID3D12Resource*
     CreateTextureImpl(ppTexture, TexDesc, InitialState, pd3d12Texture);
 }
 
+void RenderDeviceD3D12Impl::CreateFenceFromD3D12Fence(ID3D12Fence* pd3d12Fence, const FenceDesc& Desc, IFence** ppFence)
+{
+    CreateFenceImpl(ppFence, Desc, pd3d12Fence);
+}
+
+Bool RenderDeviceD3D12Impl::CreateSharedFence(IRenderDevice* pOtherDevice, const FenceDesc& Desc, IFence** ppFence, IFence** ppOtherFence)
+{
+    DEV_CHECK_ERR(ppFence != nullptr && ppOtherFence != nullptr, "ppFence and ppOtherFence must not be null");
+    if (ppFence == nullptr || ppOtherFence == nullptr)
+        return False;
+    *ppFence      = nullptr;
+    *ppOtherFence = nullptr;
+
+    const char* Name = Desc.Name != nullptr ? Desc.Name : "";
+    DEV_CHECK_ERR(Desc.Type == FENCE_TYPE_GENERAL, "Shared fence '", Name, "' must be created with FENCE_TYPE_GENERAL");
+    if (Desc.Type != FENCE_TYPE_GENERAL)
+        return False;
+
+    RefCntAutoPtr<IRenderDeviceD3D12> pOtherDeviceD3D12{pOtherDevice, IID_RenderDeviceD3D12};
+    DEV_CHECK_ERR(pOtherDeviceD3D12, "pOtherDevice must be a Direct3D12 device");
+    if (!pOtherDeviceD3D12)
+        return False;
+    RenderDeviceD3D12Impl* pOtherDeviceD3D12Impl = ClassPtrCast<RenderDeviceD3D12Impl>(pOtherDeviceD3D12.RawPtr());
+
+    // Both devices wait for values that the other device signals, which requires native fences
+    if (!GetFeatures().NativeFence || !pOtherDeviceD3D12Impl->GetFeatures().NativeFence)
+        return False;
+
+    ID3D12Device* const pd3d12OtherDevice = pOtherDeviceD3D12Impl->GetD3D12Device();
+
+    // A fence that another adapter opens must be created as a cross-adapter fence
+    const LUID ThisLuid  = m_pd3d12Device->GetAdapterLuid();
+    const LUID OtherLuid = pd3d12OtherDevice->GetAdapterLuid();
+
+    D3D12_FENCE_FLAGS Flags = D3D12_FENCE_FLAG_SHARED;
+    if (ThisLuid.LowPart != OtherLuid.LowPart || ThisLuid.HighPart != OtherLuid.HighPart)
+        Flags |= D3D12_FENCE_FLAG_SHARED_CROSS_ADAPTER;
+
+    CComPtr<ID3D12Fence> pd3d12Fence;
+    HRESULT              hr = m_pd3d12Device->CreateFence(0, Flags, __uuidof(pd3d12Fence), reinterpret_cast<void**>(static_cast<ID3D12Fence**>(&pd3d12Fence)));
+    if (FAILED(hr))
+    {
+        LOG_WARNING_MESSAGE("Failed to create shared fence '", Name, "'");
+        return False;
+    }
+
+    HANDLE hSharedFence = nullptr;
+    hr                  = m_pd3d12Device->CreateSharedHandle(pd3d12Fence, nullptr, GENERIC_ALL, nullptr, &hSharedFence);
+    if (FAILED(hr))
+    {
+        LOG_WARNING_MESSAGE("Failed to create a shared handle for fence '", Name, "'");
+        return False;
+    }
+
+    CComPtr<ID3D12Fence> pd3d12OtherFence;
+    hr = pd3d12OtherDevice->OpenSharedHandle(hSharedFence, __uuidof(pd3d12OtherFence), reinterpret_cast<void**>(static_cast<ID3D12Fence**>(&pd3d12OtherFence)));
+    CloseHandle(hSharedFence);
+    if (FAILED(hr))
+    {
+        LOG_WARNING_MESSAGE("The other device failed to open shared fence '", Name, "'");
+        return False;
+    }
+
+    try
+    {
+        CreateFenceFromD3D12Fence(pd3d12Fence, Desc, ppFence);
+        pOtherDeviceD3D12Impl->CreateFenceFromD3D12Fence(pd3d12OtherFence, Desc, ppOtherFence);
+    }
+    catch (const std::runtime_error&)
+    {
+    }
+
+    if (*ppFence == nullptr || *ppOtherFence == nullptr)
+    {
+        if (*ppFence != nullptr)
+            (*ppFence)->Release();
+        if (*ppOtherFence != nullptr)
+            (*ppOtherFence)->Release();
+        *ppFence      = nullptr;
+        *ppOtherFence = nullptr;
+        return False;
+    }
+    return True;
+}
+
 void RenderDeviceD3D12Impl::CreateTexture(const TextureDesc& TexDesc, ID3D12Resource* pd3d12Texture, RESOURCE_STATE InitialState, TextureD3D12Impl** ppTexture)
 {
     CreateDeviceObject("texture", TexDesc, ppTexture,

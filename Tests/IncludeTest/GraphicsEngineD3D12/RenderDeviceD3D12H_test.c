@@ -39,4 +39,7 @@ void TestRenderDeviceD3D12CInterface(IRenderDeviceD3D12* pDevice)
     IRenderDeviceD3D12_CreateBLASFromD3DResource(pDevice, (ID3D12Resource*)NULL, (BottomLevelASDesc*)NULL, RESOURCE_STATE_BUILD_AS_READ, (IBottomLevelAS**)NULL);
     IRenderDeviceD3D12_CreateTLASFromD3DResource(pDevice, (ID3D12Resource*)NULL, (TopLevelASDesc*)NULL, RESOURCE_STATE_BUILD_AS_READ, (ITopLevelAS**)NULL);
     IRenderDeviceD3D12_CreateTextureFromD3DResourceWithDesc(pDevice, (ID3D12Resource*)NULL, (TextureDesc*)NULL, RESOURCE_STATE_RENDER_TARGET, (ITexture**)NULL);
+
+    Bool Shared = IRenderDeviceD3D12_CreateSharedFence(pDevice, (IRenderDevice*)NULL, (const FenceDesc*)NULL, (IFence**)NULL, (IFence**)NULL);
+    (void)Shared;
 }

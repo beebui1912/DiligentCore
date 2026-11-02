@@ -29,6 +29,11 @@
 #include <array>
 #include <atomic>
 #include <limits>
+#if defined(_WIN32)
+#    include <io.h> // _close
+#else
+#    include <unistd.h> // close
+#endif
 #include "VulkanErrors.hpp"
 #include "VulkanUtilities/LogicalDevice.hpp"
 #include "VulkanUtilities/Debug.hpp"
@@ -39,6 +44,19 @@ namespace VulkanUtilities
 
 namespace
 {
+
+#if DILIGENT_USE_VOLK
+// Closes a file descriptor of a shared semaphore (see LogicalDevice::ShareSemaphoreFd())
+void CloseFileDescriptor(int Fd)
+{
+#    if defined(_WIN32)
+    _close(Fd);
+#    else
+    close(Fd);
+#    endif
+}
+#endif
+
 // volk exposes a single set of global Vulkan function pointers. The per-device optimization
 // (volkLoadDevice) rebinds those globals to one specific VkDevice, so it can only be used when a
 // single device is alive. This counter lets additional devices fall back to the instance-level
@@ -510,7 +528,7 @@ SemaphoreWrapper LogicalDevice::CreateSemaphore(const VkSemaphoreCreateInfo& Sem
     return CreateVulkanObject<VkSemaphore, VulkanHandleTypeId::Semaphore>(vkCreateSemaphore, SemaphoreCI, DebugName, "semaphore");
 }
 
-SemaphoreWrapper LogicalDevice::CreateTimelineSemaphore(uint64_t InitialValue, const char* DebugName) const
+SemaphoreWrapper LogicalDevice::CreateTimelineSemaphore(uint64_t InitialValue, const char* DebugName, bool Exportable) const
 {
     VERIFY_EXPR(m_EnabledExtFeatures.TimelineSemaphore.timelineSemaphore == VK_TRUE);
 
@@ -518,6 +536,15 @@ SemaphoreWrapper LogicalDevice::CreateTimelineSemaphore(uint64_t InitialValue, c
     TimelineCI.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
     TimelineCI.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
     TimelineCI.initialValue  = InitialValue;
+
+    VkExportSemaphoreCreateInfo ExportCI{};
+    if (Exportable)
+    {
+        VERIFY(m_EnabledExtFeatures.ExternalSemaphore, "Exporting semaphores is not enabled on this device");
+        ExportCI.sType       = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
+        ExportCI.handleTypes = ExternalSemaphoreHandleType;
+        TimelineCI.pNext     = &ExportCI;
+    }
 
     VkSemaphoreCreateInfo SemaphoreCI{};
     SemaphoreCI.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -868,6 +895,88 @@ VkResult LogicalDevice::GetMemoryHostPointerProperties(const void* pHostPointer,
 #endif
     return VK_ERROR_EXTENSION_NOT_PRESENT;
 }
+
+VkResult LogicalDevice::ShareSemaphore(VkSemaphore Semaphore, const LogicalDevice& ImportingDevice, VkSemaphore ImportingSemaphore) const
+{
+    if (!m_EnabledExtFeatures.ExternalSemaphore || !ImportingDevice.m_EnabledExtFeatures.ExternalSemaphore)
+        return VK_ERROR_EXTENSION_NOT_PRESENT;
+
+#if DILIGENT_USE_VOLK
+#    if defined(VK_USE_PLATFORM_WIN32_KHR)
+    return ShareSemaphoreWin32(Semaphore, ImportingDevice, ImportingSemaphore);
+#    else
+    return ShareSemaphoreFd(Semaphore, ImportingDevice, ImportingSemaphore);
+#    endif
+#else
+    (void)Semaphore;
+    (void)ImportingSemaphore;
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+#endif
+}
+
+#if DILIGENT_USE_VOLK
+// The per-device tables are used because the global pointers may be bound to another device (volkLoadDevice)
+#    if defined(VK_USE_PLATFORM_WIN32_KHR)
+VkResult LogicalDevice::ShareSemaphoreWin32(VkSemaphore Semaphore, const LogicalDevice& ImportingDevice, VkSemaphore ImportingSemaphore) const
+{
+    static_assert(ExternalSemaphoreHandleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT, "Windows shares semaphores through NT handles");
+    if (m_VkTable.vkGetSemaphoreWin32HandleKHR == nullptr || ImportingDevice.m_VkTable.vkImportSemaphoreWin32HandleKHR == nullptr)
+        return VK_ERROR_EXTENSION_NOT_PRESENT;
+
+    VkSemaphoreGetWin32HandleInfoKHR GetInfo{};
+    GetInfo.sType      = VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR;
+    GetInfo.semaphore  = Semaphore;
+    GetInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+
+    HANDLE   Handle = nullptr;
+    VkResult err    = m_VkTable.vkGetSemaphoreWin32HandleKHR(m_VkDevice, &GetInfo, &Handle);
+    if (err != VK_SUCCESS)
+        return err;
+
+    VkImportSemaphoreWin32HandleInfoKHR ImportInfo{};
+    ImportInfo.sType      = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR;
+    ImportInfo.semaphore  = ImportingSemaphore;
+    ImportInfo.flags      = 0; // Permanent import: the semaphore keeps the shared payload
+    ImportInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    ImportInfo.handle     = Handle;
+    ImportInfo.name       = nullptr;
+    err                   = ImportingDevice.m_VkTable.vkImportSemaphoreWin32HandleKHR(ImportingDevice.m_VkDevice, &ImportInfo);
+
+    // Importing from an NT handle does not transfer the ownership of the handle
+    CloseHandle(Handle);
+    return err;
+}
+#    endif
+
+VkResult LogicalDevice::ShareSemaphoreFd(VkSemaphore Semaphore, const LogicalDevice& ImportingDevice, VkSemaphore ImportingSemaphore) const
+{
+    if (m_VkTable.vkGetSemaphoreFdKHR == nullptr || ImportingDevice.m_VkTable.vkImportSemaphoreFdKHR == nullptr)
+        return VK_ERROR_EXTENSION_NOT_PRESENT;
+
+    VkSemaphoreGetFdInfoKHR GetInfo{};
+    GetInfo.sType      = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
+    GetInfo.semaphore  = Semaphore;
+    GetInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+
+    int      Fd  = -1;
+    VkResult err = m_VkTable.vkGetSemaphoreFdKHR(m_VkDevice, &GetInfo, &Fd);
+    if (err != VK_SUCCESS)
+        return err;
+
+    VkImportSemaphoreFdInfoKHR ImportInfo{};
+    ImportInfo.sType      = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR;
+    ImportInfo.semaphore  = ImportingSemaphore;
+    ImportInfo.flags      = 0; // Permanent import: the semaphore keeps the shared payload
+    ImportInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    ImportInfo.fd         = Fd;
+    err                   = ImportingDevice.m_VkTable.vkImportSemaphoreFdKHR(ImportingDevice.m_VkDevice, &ImportInfo);
+
+    // A successful import transfers the ownership of the file descriptor to the implementation
+    if (err != VK_SUCCESS)
+        CloseFileDescriptor(Fd);
+    return err;
+}
+#endif
 
 VkResult LogicalDevice::InvalidateMappedMemoryRanges(uint32_t memoryRangeCount, const VkMappedMemoryRange* pMemoryRanges) const
 {

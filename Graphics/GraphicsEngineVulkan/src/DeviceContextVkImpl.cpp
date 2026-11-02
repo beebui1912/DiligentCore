@@ -2614,6 +2614,18 @@ void DeviceContextVkImpl::CopyTexture(const CopyTextureAttribs& CopyAttribs)
         DstBox.MaxY = DstBox.MinY + pSrcBox->Height();
         DstBox.MaxZ = DstBox.MinZ + pSrcBox->Depth();
 
+        // A texture in imported host memory may have been written by another device that imports the same
+        // allocation, and that signaled a fence this queue waits for on the GPU (a fence shared with
+        // IRenderDeviceVk::CreateSharedFence()). The other device made its writes available to the host
+        // (the barrier after a copy into such a texture, below), and a fence only covers device accesses, so a memory
+        // dependency makes the host-domain writes available and visible to the transfer reads. If the CPU
+        // waited before this submission instead, the submission already did that and the barrier is redundant.
+        if (pSrcTexVk->IsInHostMemory())
+        {
+            EnsureVkCmdBuffer();
+            m_CommandBuffer.MemoryBarrier(VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        }
+
         CopyBufferToTexture(
             pSrcTexVk->GetVkStagingBuffer(),
             SrcBufferOffset,

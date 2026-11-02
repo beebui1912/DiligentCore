@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include "GraphicsUtilities.h"
 #include "../../../Platforms/Basic/interface/DebugUtilities.hpp"
 #include "../../../Primitives/interface/AlignedMalloc.h"
 #include "../../../Common/interface/ObjectBase.hpp"
@@ -221,7 +222,8 @@ void CrossDeviceTransferManager::Init(IRenderDevice*     pSrcDevice,
                                       IRenderDevice*     pDstDevice,
                                       const TextureDesc& Desc,
                                       Uint32             FrameLatency,
-                                      bool               AllowSharedMemory)
+                                      bool               AllowSharedMemory,
+                                      bool               AllowGpuSynchronization)
 {
     std::lock_guard<std::mutex> Lock{m_Mtx};
 
@@ -237,17 +239,6 @@ void CrossDeviceTransferManager::Init(IRenderDevice*     pSrcDevice,
     TextureDesc TransferDesc = Desc;
     TransferDesc.MipLevels   = 1;
     TransferDesc.ArraySize   = 1;
-
-    FenceDesc fenceDesc;
-    fenceDesc.Name = "CrossDevice Transfer Fence";
-
-    for (Uint32 i = 0; i < m_Latency; ++i)
-    {
-        if (m_pSrcDevice)
-            m_pSrcDevice->CreateFence(fenceDesc, &m_Buffers[i].pSecondaryFence);
-        if (m_pDstDevice)
-            m_pDstDevice->CreateFence(fenceDesc, &m_Buffers[i].pPrimaryFence);
-    }
 
     m_Mode = TransferMode::CpuCopy;
     if (AllowSharedMemory && m_pSrcDevice && m_pDstDevice)
@@ -298,8 +289,52 @@ void CrossDeviceTransferManager::Init(IRenderDevice*     pSrcDevice,
         }
     }
 
+    // GPU synchronization: every fence is shared by the device that signals it and the device whose queue
+    // waits for it. It needs the shared modes: in the CPU copy mode the CPU reads the frame, so it waits anyway.
+    m_GpuSync = false;
+    if (AllowGpuSynchronization && IsSharedMode())
+    {
+        FenceDesc SharedFenceDesc;
+        SharedFenceDesc.Name = "CrossDevice Transfer Shared Fence";
+        SharedFenceDesc.Type = FENCE_TYPE_GENERAL;
+
+        m_GpuSync = true;
+        for (FrameBufferTransfer& Buffer : m_Buffers)
+        {
+            if (!CreateCrossDeviceFence(m_pSrcDevice, m_pDstDevice, SharedFenceDesc, &Buffer.pSecondaryFence, &Buffer.pSecondaryFenceOnDst) ||
+                !CreateCrossDeviceFence(m_pDstDevice, m_pSrcDevice, SharedFenceDesc, &Buffer.pPrimaryFence, &Buffer.pPrimaryFenceOnSrc))
+            {
+                m_GpuSync = false;
+                break;
+            }
+        }
+    }
+
+    // Otherwise every fence belongs to the device that signals it, and the CPU waits for it
+    if (!m_GpuSync)
+    {
+        FenceDesc fenceDesc;
+        fenceDesc.Name = "CrossDevice Transfer Fence";
+
+        for (FrameBufferTransfer& Buffer : m_Buffers)
+        {
+            Buffer.pSecondaryFenceOnDst.Release();
+            Buffer.pPrimaryFenceOnSrc.Release();
+            Buffer.pSecondaryFence.Release();
+            Buffer.pPrimaryFence.Release();
+
+            if (m_pSrcDevice)
+                m_pSrcDevice->CreateFence(fenceDesc, &Buffer.pSecondaryFence);
+            if (m_pDstDevice)
+                m_pDstDevice->CreateFence(fenceDesc, &Buffer.pPrimaryFence);
+        }
+    }
+
     if (m_pSrcDevice && m_pDstDevice)
-        LOG_INFO_MESSAGE("CrossDeviceTransferManager: frames are transferred through ", GetTransferModeString(m_Mode));
+    {
+        LOG_INFO_MESSAGE("CrossDeviceTransferManager: frames are transferred through ", GetTransferModeString(m_Mode),
+                         (m_GpuSync ? "; the GPUs wait for each other through shared fences" : "; the CPU waits for the fences"));
+    }
 
     m_Initialized = true;
 }
@@ -322,10 +357,22 @@ void CrossDeviceTransferManager::CopySourceFrame(IDeviceContext* pSrcContext,
         return;
 
     // Shared modes: the source GPU writes the memory that the destination GPU may still be reading
-    // (the copy of this slot m_Latency transfers ago). The devices can not wait for each other's
-    // fences, so the CPU waits. TransferReadyFrame() flushes that copy, so the wait completes.
-    if (IsSharedMode() && Transfer.pPrimaryFence && Transfer.pPrimaryFence->GetCompletedValue() < Transfer.PrimaryFenceValue)
-        Transfer.pPrimaryFence->Wait(Transfer.PrimaryFenceValue);
+    // (the copy of this slot m_Latency transfers ago). TransferReadyFrame() flushed that copy and its
+    // signal, so the wait completes.
+    if (IsSharedMode() && Transfer.PrimaryFenceValue > 0)
+    {
+        if (Transfer.pPrimaryFenceOnSrc)
+        {
+            // The source queue waits on the GPU; the wait is submitted with the copy below
+            if (Transfer.pPrimaryFenceOnSrc->GetCompletedValue() < Transfer.PrimaryFenceValue)
+                pSrcContext->DeviceWaitForFence(Transfer.pPrimaryFenceOnSrc, Transfer.PrimaryFenceValue);
+        }
+        else if (Transfer.pPrimaryFence && Transfer.pPrimaryFence->GetCompletedValue() < Transfer.PrimaryFenceValue)
+        {
+            // The devices do not share fences, so the CPU waits
+            Transfer.pPrimaryFence->Wait(Transfer.PrimaryFenceValue);
+        }
+    }
 
     // Copy the rendered frame from the source render target to the transfer memory.
     CopyTextureAttribs copyAttribs(pSrcTexture, RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
@@ -365,7 +412,13 @@ bool CrossDeviceTransferManager::TransferReadyFrame(IDeviceContext* pSrcContext,
     FrameBufferTransfer& Transfer = m_Buffers[readSlot];
 
     // Wait for the source GPU to finish copying into the transfer memory.
-    if (Transfer.pSecondaryFence)
+    if (Transfer.pSecondaryFenceOnDst)
+    {
+        // GPU synchronization (shared modes only): the destination queue waits; the wait is submitted with the copy below
+        if (Transfer.pSecondaryFenceOnDst->GetCompletedValue() < Transfer.FenceValue)
+            pDstContext->DeviceWaitForFence(Transfer.pSecondaryFenceOnDst, Transfer.FenceValue);
+    }
+    else if (Transfer.pSecondaryFence)
     {
         Uint64 completed = Transfer.pSecondaryFence->GetCompletedValue();
         if (completed < Transfer.FenceValue)
@@ -480,6 +533,7 @@ void CrossDeviceTransferManager::Reset()
     m_pDstDevice.Release();
     m_Initialized = false;
     m_Mode        = TransferMode::None;
+    m_GpuSync     = false;
 }
 
 } // namespace Diligent

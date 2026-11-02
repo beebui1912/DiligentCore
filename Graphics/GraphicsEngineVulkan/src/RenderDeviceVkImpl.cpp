@@ -29,6 +29,8 @@
 
 #include "RenderDeviceVkImpl.hpp"
 
+#include <cstring>
+
 #include "PipelineStateVkImpl.hpp"
 #include "ShaderVkImpl.hpp"
 #include "TextureVkImpl.hpp"
@@ -735,6 +737,94 @@ void RenderDeviceVkImpl::CreateTextureFromHostMemory(const TextureDesc& TexDesc,
     HostMemory.pHostMemory = pHostMemory;
     HostMemory.pOwner      = pHostMemoryOwner;
     CreateTextureImpl(ppTexture, TexDesc, HostMemory);
+}
+
+namespace
+{
+
+// The Vulkan specification allows sharing a semaphore through an opaque NT handle or file descriptor only
+// between devices with the same deviceUUID and driverUUID (external semaphore handle types compatibility).
+bool CanShareTimelineSemaphores(const RenderDeviceVkImpl& Device, const RenderDeviceVkImpl& OtherDevice)
+{
+    for (const RenderDeviceVkImpl* pDevice : {&Device, &OtherDevice})
+    {
+        // ExternalSemaphore also means that the identity (VkPhysicalDeviceIDProperties) has been queried
+        if (!pDevice->GetFeatures().NativeFence || !pDevice->GetLogicalDevice().GetEnabledExtFeatures().ExternalSemaphore)
+            return false;
+    }
+
+    const VkPhysicalDeviceIDProperties& ID      = Device.GetPhysicalDevice().GetExtProperties().ID;
+    const VkPhysicalDeviceIDProperties& OtherID = OtherDevice.GetPhysicalDevice().GetExtProperties().ID;
+    return std::memcmp(ID.deviceUUID, OtherID.deviceUUID, VK_UUID_SIZE) == 0 &&
+        std::memcmp(ID.driverUUID, OtherID.driverUUID, VK_UUID_SIZE) == 0;
+}
+
+} // namespace
+
+Bool RenderDeviceVkImpl::CreateSharedFence(IRenderDevice* pOtherDevice, const FenceDesc& Desc, IFence** ppFence, IFence** ppOtherFence)
+{
+    DEV_CHECK_ERR(ppFence != nullptr && ppOtherFence != nullptr, "ppFence and ppOtherFence must not be null");
+    if (ppFence == nullptr || ppOtherFence == nullptr)
+        return False;
+    *ppFence      = nullptr;
+    *ppOtherFence = nullptr;
+
+    const char* Name = Desc.Name != nullptr ? Desc.Name : "";
+    DEV_CHECK_ERR(Desc.Type == FENCE_TYPE_GENERAL, "Shared fence '", Name, "' must be created with FENCE_TYPE_GENERAL");
+    if (Desc.Type != FENCE_TYPE_GENERAL)
+        return False;
+
+    RefCntAutoPtr<IRenderDeviceVk> pOtherDeviceVk{pOtherDevice, IID_RenderDeviceVk};
+    DEV_CHECK_ERR(pOtherDeviceVk, "pOtherDevice must be a Vulkan device");
+    if (!pOtherDeviceVk)
+        return False;
+    RenderDeviceVkImpl* pOtherDeviceVkImpl = ClassPtrCast<RenderDeviceVkImpl>(pOtherDeviceVk.RawPtr());
+
+    if (!CanShareTimelineSemaphores(*this, *pOtherDeviceVkImpl))
+        return False;
+
+    try
+    {
+        const VulkanUtilities::LogicalDevice& OtherLogicalDevice = pOtherDeviceVkImpl->GetLogicalDevice();
+
+        VulkanUtilities::SemaphoreWrapper Semaphore      = m_LogicalDevice->CreateTimelineSemaphore(0, Name, /*Exportable = */ true);
+        VulkanUtilities::SemaphoreWrapper OtherSemaphore = OtherLogicalDevice.CreateTimelineSemaphore(0, Name);
+
+        const VkResult err = m_LogicalDevice->ShareSemaphore(Semaphore, OtherLogicalDevice, OtherSemaphore);
+        if (err != VK_SUCCESS)
+        {
+            LOG_WARNING_MESSAGE("Failed to share the timeline semaphore of fence '", Name, "' with another device: ", VulkanUtilities::VkResultToString(err));
+            return False;
+        }
+
+        CreateFenceFromTimelineSemaphore(std::move(Semaphore), Desc, ppFence);
+        pOtherDeviceVkImpl->CreateFenceFromTimelineSemaphore(std::move(OtherSemaphore), Desc, ppOtherFence);
+    }
+    catch (const std::runtime_error&)
+    {
+    }
+
+    if (*ppFence == nullptr || *ppOtherFence == nullptr)
+    {
+        if (*ppFence != nullptr)
+            (*ppFence)->Release();
+        if (*ppOtherFence != nullptr)
+            (*ppOtherFence)->Release();
+        *ppFence      = nullptr;
+        *ppOtherFence = nullptr;
+        return False;
+    }
+    return True;
+}
+
+void RenderDeviceVkImpl::CreateFenceFromTimelineSemaphore(VulkanUtilities::SemaphoreWrapper&& TimelineSemaphore, const FenceDesc& Desc, IFence** ppFence)
+{
+    CreateDeviceObject("Fence", Desc, ppFence,
+                       [&]() //
+                       {
+                           FenceVkImpl* pFenceVk{NEW_RC_OBJ(m_FenceAllocator, "FenceVkImpl instance", FenceVkImpl)(this, Desc, std::move(TimelineSemaphore))};
+                           pFenceVk->QueryInterface(IID_Fence, reinterpret_cast<IObject**>(ppFence));
+                       });
 }
 
 void RenderDeviceVkImpl::CreateSampler(const SamplerDesc& SamplerDesc, ISampler** ppSampler)
