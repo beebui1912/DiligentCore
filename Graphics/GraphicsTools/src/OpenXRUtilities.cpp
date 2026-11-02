@@ -57,6 +57,7 @@ void AllocateOpenXRSwapchainImageDataD3D12(Uint32      ImageCount,
 void GetOpenXRSwapchainImageD3D12(IRenderDevice*                    pDevice,
                                   const XrSwapchainImageBaseHeader* ImageData,
                                   Uint32                            ImageIndex,
+                                  const TextureDesc&                TexDesc,
                                   ITexture**                        ppImage);
 #endif
 
@@ -223,7 +224,7 @@ void GetOpenXRSwapchainImage(IRenderDevice*                    pDevice,
 
 #if D3D12_SUPPORTED
         case RENDER_DEVICE_TYPE_D3D12:
-            GetOpenXRSwapchainImageD3D12(pDevice, ImageData, ImageIndex, ppImage);
+            GetOpenXRSwapchainImageD3D12(pDevice, ImageData, ImageIndex, TexDesc, ppImage);
             break;
 #endif
 

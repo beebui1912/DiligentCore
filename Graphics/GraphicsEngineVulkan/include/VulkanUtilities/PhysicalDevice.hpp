@@ -79,6 +79,7 @@ public:
         bool HasPortabilitySubset = false;
         bool RenderPass2          = false;
         bool DrawIndirectCount    = false;
+        bool ExternalMemoryHost   = false; // VK_EXT_external_memory_host, requires Vulkan 1.1
     };
 
     struct ExtensionProperties
@@ -99,6 +100,7 @@ public:
         VkPhysicalDeviceMultiDrawPropertiesEXT                 MultiDraw                 = {};
         VkPhysicalDeviceHostImageCopyPropertiesEXT             HostImageCopy             = {};
         VkPhysicalDeviceFragmentShaderBarycentricPropertiesKHR FragmentShaderBarycentric = {};
+        VkPhysicalDeviceExternalMemoryHostPropertiesEXT        ExternalMemoryHost        = {};
 
         std::unique_ptr<VkImageLayout[]> HostImageCopyLayouts;
     };

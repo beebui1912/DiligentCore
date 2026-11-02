@@ -95,6 +95,7 @@ void AllocateOpenXRSwapchainImageDataD3D12(Uint32      ImageCount,
 void GetOpenXRSwapchainImageD3D12(IRenderDevice*                    pDevice,
                                   const XrSwapchainImageBaseHeader* ImageData,
                                   Uint32                            ImageIndex,
+                                  const TextureDesc&                TexDesc,
                                   ITexture**                        ppImage)
 {
     const XrSwapchainImageD3D12KHR* ImageD3D12 = reinterpret_cast<const XrSwapchainImageD3D12KHR*>(ImageData);
@@ -115,7 +116,13 @@ void GetOpenXRSwapchainImageD3D12(IRenderDevice*                    pDevice,
     RefCntAutoPtr<IRenderDeviceD3D12> pDeviceD3D12{pDevice, IID_RenderDeviceD3D12};
     VERIFY_EXPR(pDeviceD3D12 != nullptr);
 
-    pDeviceD3D12->CreateTextureFromD3DResource(texture, RESOURCE_STATE_UNDEFINED, ppImage);
+    // The resource defines the size and the format: the runtime may create typeless images, which
+    // the application renders to through views in the swapchain format. The other members, such as
+    // ImmediateContextMask (the images may be rendered by a context other than context 0), are
+    // taken from TexDesc.
+    TextureDesc ImageDesc = TexDesc;
+    ImageDesc.Format      = TEX_FORMAT_UNKNOWN;
+    pDeviceD3D12->CreateTextureFromD3DResourceWithDesc(texture, ImageDesc, RESOURCE_STATE_UNDEFINED, ppImage);
 }
 
 

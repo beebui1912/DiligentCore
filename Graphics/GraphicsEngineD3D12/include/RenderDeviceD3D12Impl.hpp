@@ -211,6 +211,12 @@ public:
         return m_pDxCompiler.get();
     }
 
+    /// Implementation of IRenderDeviceD3D12::CreateTextureFromD3DResourceWithDesc().
+    virtual void DILIGENT_CALL_TYPE CreateTextureFromD3DResourceWithDesc(ID3D12Resource*    pd3d12Texture,
+                                                                         const TextureDesc& TexDesc,
+                                                                         RESOURCE_STATE     InitialState,
+                                                                         ITexture**         ppTexture) override final;
+
     void CreateRootSignature(const RefCntAutoPtr<class PipelineResourceSignatureD3D12Impl>* ppSignatures, Uint32 SignatureCount, size_t Hash, RootSignatureD3D12** ppRootSig);
 
     RootSignatureCacheD3D12& GetRootSignatureCache() { return m_RootSignatureCache; }

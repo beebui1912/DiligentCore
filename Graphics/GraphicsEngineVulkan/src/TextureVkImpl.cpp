@@ -703,6 +703,150 @@ TextureVkImpl::TextureVkImpl(IReferenceCounters*        pRefCounters,
         InitSparseProperties();
 }
 
+namespace
+{
+
+// Buffer that holds the data of a staging texture in an imported host allocation. The layout of the data is
+// the one of every staging texture, so devices that import one allocation see the same subresource offsets.
+struct HostMemoryStagingBufferCI
+{
+    VkExternalMemoryBufferCreateInfo ExternalCI{};
+    VkBufferCreateInfo               BufferCI{};
+
+    HostMemoryStagingBufferCI(const TextureDesc& Desc, const VkPhysicalDeviceLimits& Limits)
+    {
+        ExternalCI.sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
+        ExternalCI.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+
+        BufferCI.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        BufferCI.pNext       = &ExternalCI;
+        BufferCI.size        = GetStagingTextureDataSize(Desc, TextureVkImpl::StagingBufferOffsetAlignment);
+        BufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (Desc.CPUAccessFlags & CPU_ACCESS_READ)
+        {
+            // The same size as an ordinary readback texture
+            BufferCI.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            BufferCI.size  = AlignUp(BufferCI.size, Limits.nonCoherentAtomSize);
+        }
+        else
+        {
+            BufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        }
+    }
+
+    // The CI points to its own member, so the structure must not be copied
+    HostMemoryStagingBufferCI(const HostMemoryStagingBufferCI&) = delete;
+    HostMemoryStagingBufferCI& operator=(const HostMemoryStagingBufferCI&) = delete;
+};
+
+bool IsHostMemoryStagingDesc(const TextureDesc& Desc)
+{
+    const CPU_ACCESS_FLAGS Access = Desc.CPUAccessFlags & (CPU_ACCESS_READ | CPU_ACCESS_WRITE);
+    return Desc.Usage == USAGE_STAGING && (Access == CPU_ACCESS_READ || Access == CPU_ACCESS_WRITE);
+}
+
+VkDeviceSize GetHostPointerAlignment(const RenderDeviceVkImpl& DeviceVk)
+{
+    return std::max(DeviceVk.GetPhysicalDevice().GetExtProperties().ExternalMemoryHost.minImportedHostPointerAlignment, VkDeviceSize{1});
+}
+
+} // namespace
+
+bool TextureVkImpl::GetHostMemoryRequirements(const RenderDeviceVkImpl& DeviceVk,
+                                              const TextureDesc&        TexDesc,
+                                              VkDeviceSize&             Size,
+                                              VkDeviceSize&             Alignment)
+{
+    Size      = 0;
+    Alignment = 0;
+
+    const VulkanUtilities::LogicalDevice& LogicalDevice = DeviceVk.GetLogicalDevice();
+    if (!LogicalDevice.GetEnabledExtFeatures().ExternalMemoryHost || !IsHostMemoryStagingDesc(TexDesc))
+        return false;
+
+    const HostMemoryStagingBufferCI StagingCI{TexDesc, DeviceVk.GetPhysicalDevice().GetProperties().limits};
+
+    // The memory requirements of the buffer may exceed its size. The temporary buffer is never used by the GPU.
+    VkMemoryRequirements MemReqs{};
+    {
+        VulkanUtilities::BufferWrapper TmpBuffer = LogicalDevice.CreateBuffer(StagingCI.BufferCI, "Host memory requirements query");
+        MemReqs                                  = LogicalDevice.GetBufferMemoryRequirements(TmpBuffer);
+    }
+
+    Alignment = GetHostPointerAlignment(DeviceVk);
+    Size      = AlignUp(std::max(StagingCI.BufferCI.size, MemReqs.size), Alignment);
+    return true;
+}
+
+TextureVkImpl::TextureVkImpl(IReferenceCounters*         pRefCounters,
+                             FixedBlockMemoryAllocator&  TexViewObjAllocator,
+                             RenderDeviceVkImpl*         pDeviceVk,
+                             const TextureDesc&          TexDesc,
+                             const HostMemoryImportInfo& HostMemory) :
+    TTextureBase{pRefCounters, TexViewObjAllocator, pDeviceVk, TexDesc}
+{
+    if (!IsHostMemoryStagingDesc(m_Desc))
+        LOG_ERROR_AND_THROW("Texture '", m_Desc.Name, "': a texture in host memory must be a staging texture with either CPU_ACCESS_READ or CPU_ACCESS_WRITE flag.");
+    if (HostMemory.pHostMemory == nullptr)
+        LOG_ERROR_AND_THROW("Texture '", m_Desc.Name, "': host memory must not be null.");
+
+    const VulkanUtilities::LogicalDevice&  LogicalDevice  = pDeviceVk->GetLogicalDevice();
+    const VulkanUtilities::PhysicalDevice& PhysicalDevice = pDeviceVk->GetPhysicalDevice();
+    if (!LogicalDevice.GetEnabledExtFeatures().ExternalMemoryHost)
+        LOG_ERROR_AND_THROW("Texture '", m_Desc.Name, "': the device does not support importing host memory (", VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, ").");
+
+    const VkDeviceSize HostPointerAlignment = GetHostPointerAlignment(*pDeviceVk);
+    if (reinterpret_cast<uintptr_t>(HostMemory.pHostMemory) % HostPointerAlignment != 0)
+        LOG_ERROR_AND_THROW("Texture '", m_Desc.Name, "': the host memory address must be a multiple of ", HostPointerAlignment, " (minImportedHostPointerAlignment).");
+
+    const HostMemoryStagingBufferCI StagingCI{m_Desc, PhysicalDevice.GetProperties().limits};
+
+    std::string StagingBufferName = "Host memory staging buffer for '";
+    StagingBufferName += m_Desc.Name;
+    StagingBufferName += '\'';
+    m_StagingBuffer = LogicalDevice.CreateBuffer(StagingCI.BufferCI, StagingBufferName.c_str());
+
+    const VkMemoryRequirements MemReqs = LogicalDevice.GetBufferMemoryRequirements(m_StagingBuffer);
+
+    VkMemoryHostPointerPropertiesEXT HostPointerProps{};
+    VkResult                         err = LogicalDevice.GetMemoryHostPointerProperties(HostMemory.pHostMemory, HostPointerProps);
+    CHECK_VK_ERROR_AND_THROW(err, "Failed to get the memory types into which host memory can be imported");
+
+    // The CPU and other devices access the allocation without flushing or invalidating mapped ranges
+    const uint32_t MemoryTypeIndex = PhysicalDevice.GetMemoryTypeIndex(MemReqs.memoryTypeBits & HostPointerProps.memoryTypeBits,
+                                                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (MemoryTypeIndex == VulkanUtilities::PhysicalDevice::InvalidMemoryTypeIndex)
+        LOG_ERROR_AND_THROW("Texture '", m_Desc.Name, "': no host-coherent memory type can import the host memory.");
+
+    VkImportMemoryHostPointerInfoEXT ImportInfo{};
+    ImportInfo.sType        = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT;
+    ImportInfo.handleType   = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+    ImportInfo.pHostPointer = HostMemory.pHostMemory;
+
+    // The size must be a multiple of minImportedHostPointerAlignment
+    // (VUID-VkMemoryAllocateInfo-allocationSize-01745). GetHostMemoryRequirements() returns the same size.
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    AllocInfo.pNext           = &ImportInfo;
+    AllocInfo.allocationSize  = AlignUp(std::max(StagingCI.BufferCI.size, MemReqs.size), HostPointerAlignment);
+    AllocInfo.memoryTypeIndex = MemoryTypeIndex;
+
+    std::string MemoryName = "Imported host memory for '";
+    MemoryName += m_Desc.Name;
+    MemoryName += '\'';
+    m_HostMemory.Memory = LogicalDevice.AllocateDeviceMemory(AllocInfo, MemoryName.c_str());
+
+    err = LogicalDevice.BindBufferMemory(m_StagingBuffer, m_HostMemory.Memory, 0);
+    CHECK_VK_ERROR_AND_THROW(err, "Failed to bind imported host memory to the staging buffer");
+
+    m_HostMemory.pOwner        = HostMemory.pOwner;
+    m_pHostMemory              = HostMemory.pHostMemory;
+    m_StagingDataAlignedOffset = 0;
+
+    // Staging textures stay in one state, as the ones in device memory
+    SetState((m_Desc.CPUAccessFlags & CPU_ACCESS_READ) ? RESOURCE_STATE_COPY_DEST : RESOURCE_STATE_COPY_SOURCE);
+}
+
 void TextureVkImpl::CreateViewInternal(const TextureViewDesc& ViewDesc, ITextureView** ppView, bool bIsDefaultView)
 {
     VERIFY(ppView != nullptr, "View pointer address is null");
@@ -744,6 +888,9 @@ TextureVkImpl::~TextureVkImpl()
     if (m_StagingBuffer)
         m_pDevice->SafeReleaseDeviceObject(std::move(m_StagingBuffer), m_Desc.ImmediateContextMask);
     m_pDevice->SafeReleaseDeviceObject(std::move(m_MemoryAllocation), m_Desc.ImmediateContextMask);
+    // After the buffer: the memory object is freed, then the owner releases the host allocation
+    if (m_pHostMemory != nullptr)
+        m_pDevice->SafeReleaseDeviceObject(std::move(m_HostMemory), m_Desc.ImmediateContextMask);
 }
 
 VulkanUtilities::ImageViewWrapper TextureVkImpl::CreateImageView(TextureViewDesc& ViewDesc)
@@ -957,6 +1104,10 @@ VkImageLayout TextureVkImpl::GetLayout() const
 
 void TextureVkImpl::InvalidateStagingRange(VkDeviceSize Offset, VkDeviceSize Size)
 {
+    // Imported host memory is host-coherent and is not mapped with vkMapMemory()
+    if (m_pHostMemory != nullptr)
+        return;
+
     const VulkanUtilities::LogicalDevice& LogicalDevice    = m_pDevice->GetLogicalDevice();
     const VkPhysicalDeviceLimits&         PhysDeviceLimits = m_pDevice->GetPhysicalDevice().GetProperties().limits;
 

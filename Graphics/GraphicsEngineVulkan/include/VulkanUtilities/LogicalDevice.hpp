@@ -232,6 +232,10 @@ public:
     VkResult MapMemory(VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void** ppData) const;
     void     UnmapMemory(VkDeviceMemory memory) const;
 
+    // VK_EXT_external_memory_host: the memory types into which the host allocation can be imported.
+    // Returns VK_ERROR_EXTENSION_NOT_PRESENT if the extension is not enabled.
+    VkResult GetMemoryHostPointerProperties(const void* pHostPointer, VkMemoryHostPointerPropertiesEXT& Properties) const;
+
     VkResult InvalidateMappedMemoryRanges(uint32_t memoryRangeCount, const VkMappedMemoryRange* pMemoryRanges) const;
     VkResult FlushMappedMemoryRanges(uint32_t memoryRangeCount, const VkMappedMemoryRange* pMemoryRanges) const;
 

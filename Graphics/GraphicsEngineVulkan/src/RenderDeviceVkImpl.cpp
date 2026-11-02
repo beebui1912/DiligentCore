@@ -719,6 +719,24 @@ void RenderDeviceVkImpl::CreateTexture(const TextureDesc& TexDesc, const Texture
     CreateTextureImpl(ppTexture, TexDesc, pData);
 }
 
+Bool RenderDeviceVkImpl::GetHostMemoryTextureRequirements(const TextureDesc& TexDesc, Uint64& Size, Uint64& Alignment) const
+{
+    VkDeviceSize vkSize      = 0;
+    VkDeviceSize vkAlignment = 0;
+    const bool   Supported   = TextureVkImpl::GetHostMemoryRequirements(*this, TexDesc, vkSize, vkAlignment);
+    Size                     = vkSize;
+    Alignment                = vkAlignment;
+    return Supported;
+}
+
+void RenderDeviceVkImpl::CreateTextureFromHostMemory(const TextureDesc& TexDesc, void* pHostMemory, IObject* pHostMemoryOwner, ITexture** ppTexture)
+{
+    TextureVkImpl::HostMemoryImportInfo HostMemory;
+    HostMemory.pHostMemory = pHostMemory;
+    HostMemory.pOwner      = pHostMemoryOwner;
+    CreateTextureImpl(ppTexture, TexDesc, HostMemory);
+}
+
 void RenderDeviceVkImpl::CreateSampler(const SamplerDesc& SamplerDesc, ISampler** ppSampler)
 {
     CreateSamplerImpl(ppSampler, SamplerDesc);

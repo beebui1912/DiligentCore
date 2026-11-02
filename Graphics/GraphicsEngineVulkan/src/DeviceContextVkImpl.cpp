@@ -2646,6 +2646,12 @@ void DeviceContextVkImpl::CopyTexture(const CopyTextureAttribs& CopyAttribs)
             DstBufferOffset,
             DstMipLevelAttribs.StorageWidth // GetStagingTextureLocationOffset assumes texels are tightly packed
         );
+
+        // A texture in imported host memory is read by the host, or by another device that imports the same
+        // allocation, after a fence wait. A fence only covers device accesses, so a memory dependency must
+        // make the transfer writes available to the host.
+        if (pDstTexVk->IsInHostMemory())
+            m_CommandBuffer.MemoryBarrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT);
     }
     else
     {

@@ -359,6 +359,18 @@ PhysicalDevice::PhysicalDevice(const CreateInfo& CI) :
             m_ExtFeatures.ComputeShaderDerivatives.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
         }
 
+        // Importing host allocations lets another device share the memory without a CPU copy.
+        // The extension depends on VK_KHR_external_memory, which is core in Vulkan 1.1.
+        if (m_vkVersion >= VK_API_VERSION_1_1 && IsExtensionSupported(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME))
+        {
+            m_ExtFeatures.ExternalMemoryHost = true;
+
+            *NextProp = &m_ExtProperties.ExternalMemoryHost;
+            NextProp  = &m_ExtProperties.ExternalMemoryHost.pNext;
+
+            m_ExtProperties.ExternalMemoryHost.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT;
+        }
+
         const bool HostImageCopySupported = IsExtensionSupported(VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME);
         if (HostImageCopySupported)
         {

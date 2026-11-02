@@ -138,6 +138,9 @@ public:
     /// Implementation of ICommandQueueVk::GetQueueFamilyIndex().
     virtual uint32_t DILIGENT_CALL_TYPE GetQueueFamilyIndex() const override final { return m_QueueFamilyIndex; }
 
+    /// Implementation of ICommandQueueVk::GetQueueIndex().
+    virtual uint32_t DILIGENT_CALL_TYPE GetQueueIndex() const override final { return m_QueueIndex; }
+
     /// Implementation of ICommandQueueVk::EnqueueSignalFence().
     virtual void DILIGENT_CALL_TYPE EnqueueSignalFence(VkFence vkFence) override final;
 
@@ -177,6 +180,7 @@ private:
 
     const VkQueue            m_VkQueue;
     const HardwareQueueIndex m_QueueFamilyIndex;
+    const Uint32             m_QueueIndex; // Index of m_VkQueue in its queue family
     const SoftwareQueueIndex m_CommandQueueId;
     const bool               m_SupportedTimelineSemaphore;
     const Uint8              m_NumCommandQueues;

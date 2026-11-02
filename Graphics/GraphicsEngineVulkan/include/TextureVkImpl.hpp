@@ -36,6 +36,7 @@
 #include "TextureBase.hpp"
 #include "TextureViewVkImpl.hpp"
 #include "VulkanUtilities/MemoryManager.hpp"
+#include "RefCntAutoPtr.hpp"
 
 namespace Diligent
 {
@@ -62,6 +63,31 @@ public:
                   RESOURCE_STATE             InitialState,
                   VkImage                    VkImageHandle);
 
+    // Host allocation that a staging texture imports (VK_EXT_external_memory_host)
+    struct HostMemoryImportInfo
+    {
+        void*    pHostMemory = nullptr;
+        IObject* pOwner      = nullptr;
+    };
+
+    // Creates a staging texture whose data is stored in an imported host allocation
+    // (IRenderDeviceVk::CreateTextureFromHostMemory)
+    TextureVkImpl(IReferenceCounters*         pRefCounters,
+                  FixedBlockMemoryAllocator&  TexViewObjAllocator,
+                  class RenderDeviceVkImpl*   pDeviceVk,
+                  const TextureDesc&          TexDesc,
+                  const HostMemoryImportInfo& HostMemory);
+
+    // Size and address alignment of a host allocation for a staging texture created in host memory.
+    // Returns false if the device can not import host memory or the description is not a staging one.
+    static bool GetHostMemoryRequirements(const class RenderDeviceVkImpl& DeviceVk,
+                                          const TextureDesc&              TexDesc,
+                                          VkDeviceSize&                   Size,
+                                          VkDeviceSize&                   Alignment);
+
+    // True for a staging texture created in an imported host allocation
+    bool IsInHostMemory() const { return m_pHostMemory != nullptr; }
+
     ~TextureVkImpl();
 
     IMPLEMENT_QUERY_INTERFACE_IN_PLACE(IID_TextureVk, TTextureBase)
@@ -85,6 +111,9 @@ public:
 
     uint8_t* GetStagingDataCPUAddress() const
     {
+        if (m_pHostMemory != nullptr)
+            return static_cast<uint8_t*>(m_pHostMemory) + m_StagingDataAlignedOffset;
+
         uint8_t* StagingDataCPUAddress = reinterpret_cast<uint8_t*>(m_MemoryAllocation.Page->GetCPUMemory());
         VERIFY_EXPR(StagingDataCPUAddress != nullptr);
         StagingDataCPUAddress += m_StagingDataAlignedOffset;
@@ -129,6 +158,16 @@ protected:
     VulkanUtilities::BufferWrapper    m_StagingBuffer;
     VulkanUtilities::MemoryAllocation m_MemoryAllocation;
     VkDeviceSize                      m_StagingDataAlignedOffset = 0;
+
+    // Imported host allocation of a staging texture created in host memory. The members are destroyed
+    // in reverse order, so the owner releases the allocation after the memory object has been freed.
+    struct ImportedHostMemory
+    {
+        RefCntAutoPtr<IObject>               pOwner;
+        VulkanUtilities::DeviceMemoryWrapper Memory;
+    };
+    ImportedHostMemory m_HostMemory;
+    void*              m_pHostMemory = nullptr;
 
 #ifdef DILIGENT_DEVELOPMENT
     std::atomic<Uint32> m_DvpUsedNodes{0};

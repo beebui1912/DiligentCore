@@ -1403,6 +1403,15 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
                 NextExt  = &EnabledExtFeats.HostImageCopy.pNext;
             }
 
+            // Unlinked multi-GPU: staging textures in an imported host allocation let two devices exchange
+            // data without a CPU copy (IRenderDeviceVk::CreateTextureFromHostMemory). The extension has no
+            // feature structure.
+            if (DeviceExtFeatures.ExternalMemoryHost)
+            {
+                DeviceExtensions.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+                EnabledExtFeats.ExternalMemoryHost = true;
+            }
+
             // Append user-defined features
             *NextExt = EngineCI.pDeviceExtensionFeatures;
         }
@@ -1669,7 +1678,8 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
             DefaultContextInfo.Name    = "Graphics context";
             DefaultContextInfo.QueueId = static_cast<Uint8>(QueueInfos[0].queueFamilyIndex);
 
-            CommandQueuesVk[0] = NEW_RC_OBJ(RawMemAllocator, "CommandQueueVk instance", CommandQueueVkImpl)(LogicalDevice, SoftwareQueueIndex{0}, 1u, 1u, DefaultContextInfo, LogicalDevice->IsDeviceGroup());
+            // One command queue that uses queue 0 of the family
+            CommandQueuesVk[0] = NEW_RC_OBJ(RawMemAllocator, "CommandQueueVk instance", CommandQueueVkImpl)(LogicalDevice, SoftwareQueueIndex{0}, 1u, 0u, DefaultContextInfo, LogicalDevice->IsDeviceGroup());
             CommandQueues[0]   = CommandQueuesVk[0];
         }
 

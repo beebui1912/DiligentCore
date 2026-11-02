@@ -48,6 +48,7 @@ CommandQueueVkImpl::CommandQueueVkImpl(IReferenceCounters*                      
     m_LogicalDevice             {LogicalDevice},
     m_VkQueue                   {LogicalDevice->GetQueue(HardwareQueueIndex{CreateInfo.QueueId}, vkQueueIndex)},
     m_QueueFamilyIndex          {CreateInfo.QueueId},
+    m_QueueIndex                {vkQueueIndex},
     m_CommandQueueId            {static_cast<Uint8>(CommandQueueId)},
     m_SupportedTimelineSemaphore{LogicalDevice->GetEnabledExtFeatures().TimelineSemaphore.timelineSemaphore == VK_TRUE},
     m_NumCommandQueues          {static_cast<Uint8>(m_SupportedTimelineSemaphore ? 1u : NumCommandQueues)},

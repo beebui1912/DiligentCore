@@ -668,6 +668,12 @@ void RenderDeviceD3D12Impl::CreateTextureFromD3DResource(ID3D12Resource* pd3d12T
     CreateTextureImpl(ppTexture, TexDesc, InitialState, pd3d12Texture);
 }
 
+void RenderDeviceD3D12Impl::CreateTextureFromD3DResourceWithDesc(ID3D12Resource* pd3d12Texture, const TextureDesc& TexDesc, RESOURCE_STATE InitialState, ITexture** ppTexture)
+{
+    // The TextureD3D12Impl constructor takes the members that the resource defines from the resource
+    CreateTextureImpl(ppTexture, TexDesc, InitialState, pd3d12Texture);
+}
+
 void RenderDeviceD3D12Impl::CreateTexture(const TextureDesc& TexDesc, ID3D12Resource* pd3d12Texture, RESOURCE_STATE InitialState, TextureD3D12Impl** ppTexture)
 {
     CreateDeviceObject("texture", TexDesc, ppTexture,

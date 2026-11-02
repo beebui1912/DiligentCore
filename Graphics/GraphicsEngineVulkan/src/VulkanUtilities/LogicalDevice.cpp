@@ -177,10 +177,13 @@ LogicalDevice::LogicalDevice(const CreateInfo& CI) :
 
 VkQueue LogicalDevice::GetQueue(HardwareQueueIndex queueFamilyIndex, uint32_t queueIndex)
 {
+    // The index used to be ignored (queue 0 was always returned), so every context of a family shared
+    // VkQueue 0 while each command queue had its own lock, and the queue index reported to OpenXR was
+    // not the one in use. CreateDeviceAndContextsVk() creates enough queues for every index it selects.
     VkQueue vkQueue = VK_NULL_HANDLE;
     vkGetDeviceQueue(m_VkDevice,
                      queueFamilyIndex, // Index of the queue family to which the queue belongs
-                     0,                // Index within this queue family of the queue to retrieve
+                     queueIndex,       // Index within this queue family of the queue to retrieve
                      &vkQueue);
     VERIFY_EXPR(vkQueue != VK_NULL_HANDLE);
     return vkQueue;
@@ -850,6 +853,20 @@ VkResult LogicalDevice::MapMemory(VkDeviceMemory memory, VkDeviceSize offset, Vk
 void LogicalDevice::UnmapMemory(VkDeviceMemory memory) const
 {
     vkUnmapMemory(m_VkDevice, memory);
+}
+
+VkResult LogicalDevice::GetMemoryHostPointerProperties(const void* pHostPointer, VkMemoryHostPointerPropertiesEXT& Properties) const
+{
+    Properties       = {};
+    Properties.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT;
+#if DILIGENT_USE_VOLK
+    // The per-device table is bound to this device even when another device rebound the global pointers
+    if (m_EnabledExtFeatures.ExternalMemoryHost && m_VkTable.vkGetMemoryHostPointerPropertiesEXT != nullptr)
+        return m_VkTable.vkGetMemoryHostPointerPropertiesEXT(m_VkDevice, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, pHostPointer, &Properties);
+#else
+    (void)pHostPointer;
+#endif
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
 }
 
 VkResult LogicalDevice::InvalidateMappedMemoryRanges(uint32_t memoryRangeCount, const VkMappedMemoryRange* pMemoryRanges) const

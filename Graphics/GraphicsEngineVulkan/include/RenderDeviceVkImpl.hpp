@@ -258,6 +258,17 @@ public:
         return m_pDxCompiler.get();
     }
 
+    /// Implementation of IRenderDeviceVk::GetHostMemoryTextureRequirements().
+    virtual Bool DILIGENT_CALL_TYPE GetHostMemoryTextureRequirements(const TextureDesc& TexDesc,
+                                                                     Uint64&            Size,
+                                                                     Uint64&            Alignment) const override final;
+
+    /// Implementation of IRenderDeviceVk::CreateTextureFromHostMemory().
+    virtual void DILIGENT_CALL_TYPE CreateTextureFromHostMemory(const TextureDesc& TexDesc,
+                                                                void*              pHostMemory,
+                                                                IObject*           pHostMemoryOwner,
+                                                                ITexture**         ppTexture) override final;
+
     DescriptorSetAllocation AllocateDescriptorSet(Uint64 CommandQueueMask, VkDescriptorSetLayout SetLayout, const char* DebugName = "")
     {
         return m_DescriptorSetAllocator.Allocate(CommandQueueMask, SetLayout, DebugName);

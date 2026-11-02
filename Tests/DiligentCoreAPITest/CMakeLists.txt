@@ -67,6 +67,29 @@ if(NOT VULKAN_SUPPORTED OR NOT ${DILIGENT_USE_SPIRV_TOOLCHAIN} OR ${DILIGENT_NO_
     )
 endif()
 
+# The OpenXR tests need the loader, which is linked below
+set(OPENXR_TESTS_SUPPORTED FALSE)
+if(DILIGENT_USE_OPENXR AND TARGET openxr_loader)
+    set(OPENXR_TESTS_SUPPORTED TRUE)
+endif()
+
+if(NOT OPENXR_TESTS_SUPPORTED)
+    list(REMOVE_ITEM SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/OpenXRTestHelpers.cpp)
+    list(REMOVE_ITEM INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/include/OpenXRTestHelpers.hpp)
+endif()
+
+if(NOT VULKAN_SUPPORTED OR NOT OPENXR_TESTS_SUPPORTED)
+    list(REMOVE_ITEM SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/Vulkan/OpenXRVkTest.cpp)
+endif()
+
+if(NOT D3D11_SUPPORTED OR NOT OPENXR_TESTS_SUPPORTED)
+    list(REMOVE_ITEM SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/D3D11/OpenXRD3D11Test.cpp)
+endif()
+
+if(NOT D3D12_SUPPORTED OR NOT OPENXR_TESTS_SUPPORTED)
+    list(REMOVE_ITEM SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/D3D12/OpenXRD3D12Test.cpp)
+endif()
+
 if(METAL_SUPPORTED)
     file(GLOB MTL_SOURCE LIST_DIRECTORIES false src/Metal/*)
     file(GLOB MTL_INCLUDE LIST_DIRECTORIES false include/Metal/*)
@@ -132,6 +155,17 @@ endif()
 
 if(TARGET Diligent-HLSL2GLSLConverterLib)
     target_link_libraries(DiligentCoreAPITest PRIVATE Diligent-HLSL2GLSLConverterLib)
+endif()
+
+if(OPENXR_TESTS_SUPPORTED)
+    # The OpenXR tests create OpenXR instances; the loader finds the runtime (XR_RUNTIME_JSON or the active runtime)
+    target_link_libraries(DiligentCoreAPITest PRIVATE openxr_loader OpenXR::headers)
+    get_target_property(OPENXR_LOADER_TYPE openxr_loader TYPE)
+    if(OPENXR_LOADER_TYPE STREQUAL "SHARED_LIBRARY")
+        add_custom_command(TARGET DiligentCoreAPITest POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:openxr_loader> $<TARGET_FILE_DIR:DiligentCoreAPITest>
+        )
+    endif()
 endif()
 
 if(VULKAN_SUPPORTED)
